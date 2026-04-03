@@ -9,10 +9,14 @@ import pandas as pd
 from pathlib import Path
 import argparse
 import time
+from datetime import datetime, timezone
 
 # Nashville ArcGIS FeatureServer endpoint for Parcels (public view)
 PARCELS_URL = "https://services2.arcgis.com/HdTo6HJqh92wn4D8/arcgis/rest/services/Parcels_view/FeatureServer/0/query"
 LAYER_INFO_URL = "https://services2.arcgis.com/HdTo6HJqh92wn4D8/arcgis/rest/services/Parcels_view/FeatureServer/0"
+
+# BigQuery destination
+DEFAULT_BQ_TABLE = "public-data-dev.property_tax.davidson_parcels"
 
 
 def get_layer_info():
@@ -145,6 +149,47 @@ def clean_for_bigquery(df):
     return df
 
 
+def load_to_bigquery(csv_path, table_id, truncate=False):
+    """
+    Load CSV data to BigQuery.
+
+    Args:
+        csv_path: Path to the CSV file
+        table_id: Fully qualified BigQuery table ID (project.dataset.table)
+        truncate: If True, replace existing data; if False, append
+    """
+    from google.cloud import bigquery
+
+    client = bigquery.Client()
+
+    # Get schema from existing table
+    table = client.get_table(table_id)
+    schema = table.schema
+
+    # Read CSV with all columns as strings to avoid type issues
+    df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+    df["load_timestamp"] = datetime.now(timezone.utc).isoformat()
+
+    # Replace empty strings with None for proper NULL handling
+    df = df.replace("", None)
+
+    job_config = bigquery.LoadJobConfig(
+        schema=schema,
+        write_disposition=(
+            bigquery.WriteDisposition.WRITE_TRUNCATE
+            if truncate
+            else bigquery.WriteDisposition.WRITE_APPEND
+        ),
+    )
+
+    print(f"Loading {len(df)} rows to {table_id}...")
+    job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+    job.result()  # Wait for completion
+
+    table = client.get_table(table_id)
+    print(f"Loaded {len(df)} rows. Table now has {table.num_rows} total rows.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract Davidson County parcel data")
     parser.add_argument(
@@ -164,6 +209,22 @@ def main():
         action="store_true",
         help="Show available fields and exit"
     )
+    parser.add_argument(
+        "--load-bq",
+        action="store_true",
+        help="Load CSV data to BigQuery"
+    )
+    parser.add_argument(
+        "--bq-table",
+        type=str,
+        default=DEFAULT_BQ_TABLE,
+        help=f"BigQuery table ID (default: {DEFAULT_BQ_TABLE})"
+    )
+    parser.add_argument(
+        "--truncate",
+        action="store_true",
+        help="Truncate table before loading (default: append)"
+    )
     args = parser.parse_args()
 
     # Show available fields if requested
@@ -175,6 +236,16 @@ def main():
             field_type = info.get("type", "unknown")
             alias = info.get("alias", name)
             print(f"  {name} ({field_type}): {alias}")
+        return
+
+    # Load CSV to BigQuery if requested
+    if args.load_bq:
+        csv_path = Path(args.output)
+        if not csv_path.exists():
+            print(f"Error: CSV file not found at {csv_path}")
+            print("Run without --load-bq first to extract data.")
+            return
+        load_to_bigquery(csv_path, args.bq_table, truncate=args.truncate)
         return
 
     # Extract parcels

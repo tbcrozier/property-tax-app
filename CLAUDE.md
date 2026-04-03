@@ -5,6 +5,12 @@ Comparative analysis tool for property tax assessments. Goal: identify parcels t
 
 ## Project Structure
 ```
+infra/                # Terraform infrastructure
+  main.tf             # BigQuery dataset, table, and views
+  variables.tf        # Variable definitions
+  outputs.tf          # Output values
+  terraform.tfvars    # Variable values (gitignored)
+
 parcels/
   davidson/           # Davidson County (Nashville, TN)
     extract_parcels.py  # Script to fetch parcel data from ArcGIS API
@@ -34,5 +40,32 @@ python3 extract_parcels.py --count 300000
 
 # Show available fields
 python3 extract_parcels.py --show-fields
+
+# Load CSV to BigQuery (append)
+python3 extract_parcels.py --load-bq
+
+# Load CSV to BigQuery (truncate/replace)
+python3 extract_parcels.py --load-bq --truncate
 ```
+
+### Deploy BigQuery Infrastructure
+```bash
+cd infra
+
+# Initialize Terraform
+terraform init
+
+# Review changes
+terraform plan
+
+# Apply infrastructure
+terraform apply
+```
+
+## BigQuery Resources
+- **Dataset**: `property_tax`
+- **Table**: `davidson_parcels` - Raw parcel data
+- **Views**:
+  - `v_assessment_by_land_use` - Summary stats by land use type
+  - `v_assessment_outliers` - Parcels with z-score > 2 or < -2 (potential over/under assessed)
 
