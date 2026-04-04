@@ -68,4 +68,23 @@ terraform apply
 - **Views**:
   - `v_assessment_by_land_use` - Summary stats by land use type
   - `v_assessment_outliers` - Parcels with z-score > 2 or < -2 (potential over/under assessed)
+  - `v_assessment_sale_ratio` - Compares assessment to sale price for recent sales
+  - `v_neighborhood_comparison` - Compares properties to zip code peers
+  - `v_appeal_candidates` - Composite appeal strength score (0-100) with savings estimate
+  - `v_single_family_appeals` - Filtered view for single family homes with score > 20
+
+## Appeal Analytics
+
+### Appeal Strength Score (0-100)
+Properties are scored based on multiple signals:
+- **Z-score vs land use peers** (max 30 pts) - How many std devs above average
+- **% above zip code median** (max 30 pts) - Local neighborhood comparison
+- **% above land use median** (max 20 pts) - County-wide comparison
+- **Assessment > sale price** (max 20 pts) - If assessed higher than recent sale
+
+### Appeal Recommendations
+- `STRONG_CANDIDATE` - z-score > 2 AND >20% above zip median
+- `MODERATE_CANDIDATE` - z-score > 1.5 OR >30% above zip median
+- `WORTH_REVIEWING` - z-score > 1 OR >15% above zip median
+- `LIKELY_FAIR` - Assessment appears reasonable
 
