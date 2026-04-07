@@ -496,3 +496,133 @@ resource "google_bigquery_table" "view_parcel_rail_enrichment" {
     google_bigquery_table.rail_lines
   ]
 }
+
+# BigQuery Table - FEMA Floodplain (NFHL)
+# Stores FEMA National Flood Hazard Layer polygon geometry for flood zone analysis
+resource "google_bigquery_table" "fema_floodzone" {
+  dataset_id          = google_bigquery_dataset.property_tax.dataset_id
+  table_id            = "fema_floodzone"
+  description         = "FEMA National Flood Hazard Layer (NFHL) flood zones for Davidson County area"
+  deletion_protection = false
+
+  schema = jsonencode([
+    { name = "object_id", type = "INTEGER", mode = "NULLABLE", description = "FEMA object ID" },
+    { name = "dfirm_id", type = "STRING", mode = "NULLABLE", description = "Digital Flood Insurance Rate Map ID" },
+    { name = "flood_area_id", type = "STRING", mode = "NULLABLE", description = "Flood area ID" },
+    { name = "study_type", type = "STRING", mode = "NULLABLE", description = "Type of flood study" },
+    { name = "flood_zone", type = "STRING", mode = "NULLABLE", description = "Flood zone designation (A, AE, X, etc.)" },
+    { name = "zone_subtype", type = "STRING", mode = "NULLABLE", description = "Zone subtype for additional classification" },
+    { name = "sfha_tf", type = "BOOLEAN", mode = "NULLABLE", description = "Special Flood Hazard Area (True/False)" },
+    { name = "static_bfe", type = "FLOAT64", mode = "NULLABLE", description = "Static Base Flood Elevation" },
+    { name = "source_citation", type = "STRING", mode = "NULLABLE", description = "Source citation for the flood data" },
+    { name = "gfid", type = "STRING", mode = "NULLABLE", description = "Global Feature ID" },
+    { name = "zone_description", type = "STRING", mode = "NULLABLE", description = "Human-readable zone description" },
+    { name = "geom", type = "GEOGRAPHY", mode = "NULLABLE", description = "Flood zone geometry (Polygon/MultiPolygon)" },
+    { name = "load_timestamp", type = "TIMESTAMP", mode = "NULLABLE", description = "When the record was loaded" }
+  ])
+}
+
+# View: Parcel Floodzone Enrichment
+# Determines which parcels are in flood zones and their risk classification
+resource "google_bigquery_table" "view_parcel_floodzone_enrichment" {
+  dataset_id = google_bigquery_dataset.property_tax.dataset_id
+  table_id   = "v_parcel_floodzone_enrichment"
+
+  view {
+    query          = <<-SQL
+      WITH parcel_points AS (
+        -- Create point geometry for each parcel from lat/lon
+        SELECT
+          ParID AS parcel_id,
+          PropAddr AS property_address,
+          LUDesc AS land_use,
+          TotlAppr AS total_appraisal,
+          Acres AS acres,
+          Lat AS latitude,
+          Lon AS longitude,
+          ST_GEOGPOINT(Lon, Lat) AS parcel_point
+        FROM `${var.project_id}.${var.dataset_id}.davidson_parcels`
+        WHERE Lat IS NOT NULL AND Lon IS NOT NULL
+      ),
+      parcel_flood_zones AS (
+        -- Find flood zones that contain each parcel
+        SELECT
+          p.parcel_id,
+          p.property_address,
+          p.land_use,
+          p.total_appraisal,
+          p.acres,
+          p.latitude,
+          p.longitude,
+          p.parcel_point,
+          f.flood_zone,
+          f.zone_subtype,
+          f.sfha_tf,
+          f.zone_description,
+          -- Rank flood zones by risk (SFHA zones first, then by zone code)
+          ROW_NUMBER() OVER (
+            PARTITION BY p.parcel_id
+            ORDER BY
+              f.sfha_tf DESC,
+              CASE f.flood_zone
+                WHEN 'V' THEN 1
+                WHEN 'VE' THEN 2
+                WHEN 'A' THEN 3
+                WHEN 'AE' THEN 4
+                WHEN 'AH' THEN 5
+                WHEN 'AO' THEN 6
+                WHEN 'AR' THEN 7
+                WHEN 'A99' THEN 8
+                WHEN 'D' THEN 9
+                WHEN 'X' THEN 10
+                ELSE 11
+              END
+          ) AS zone_rank
+        FROM parcel_points p
+        INNER JOIN `${var.project_id}.${var.dataset_id}.fema_floodzone` f
+          ON ST_CONTAINS(f.geom, p.parcel_point)
+      ),
+      highest_risk_zone AS (
+        -- Keep only the highest risk zone for each parcel
+        SELECT * FROM parcel_flood_zones WHERE zone_rank = 1
+      )
+      SELECT
+        p.parcel_id,
+        p.property_address,
+        p.land_use,
+        p.total_appraisal,
+        p.acres,
+        p.latitude,
+        p.longitude,
+        p.parcel_point,
+        -- Flood zone info (NULL if not in any flood zone)
+        h.flood_zone,
+        h.zone_subtype,
+        h.sfha_tf AS in_sfha,
+        h.zone_description,
+        -- Boolean flags for easy filtering
+        h.flood_zone IS NOT NULL AS in_flood_zone,
+        COALESCE(h.sfha_tf, FALSE) AS in_special_flood_hazard_area,
+        h.flood_zone IN ('A', 'AE', 'AH', 'AO', 'AR', 'A99', 'V', 'VE') AS in_high_risk_zone,
+        h.flood_zone = 'X' AND h.zone_subtype IS NOT NULL AS in_moderate_risk_zone,
+        -- Risk category for grouping
+        CASE
+          WHEN h.flood_zone IN ('V', 'VE') THEN 'HIGH_RISK_COASTAL'
+          WHEN h.flood_zone IN ('A', 'AE', 'AH', 'AO', 'AR', 'A99') THEN 'HIGH_RISK'
+          WHEN h.flood_zone = 'X' AND h.zone_subtype IS NOT NULL THEN 'MODERATE_RISK'
+          WHEN h.flood_zone = 'D' THEN 'UNDETERMINED'
+          WHEN h.flood_zone = 'X' THEN 'MINIMAL_RISK'
+          WHEN h.flood_zone IS NULL THEN 'NOT_IN_FLOOD_ZONE'
+          ELSE 'OTHER'
+        END AS flood_risk_category
+      FROM parcel_points p
+      LEFT JOIN highest_risk_zone h ON p.parcel_id = h.parcel_id
+    SQL
+    use_legacy_sql = false
+  }
+
+  depends_on = [
+    google_bigquery_table.davidson_parcels,
+    google_bigquery_table.fema_floodzone
+  ]
+}

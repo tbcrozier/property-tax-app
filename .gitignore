@@ -209,6 +209,8 @@ __marimo__/
 # Data files
 parcels/*/data/
 railroad/data/
+floodzone/data/
+
 
 # Terraform
 .terraform/
