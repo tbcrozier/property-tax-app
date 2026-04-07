@@ -398,3 +398,101 @@ resource "google_bigquery_table" "view_single_family_appeals" {
 
   depends_on = [google_bigquery_table.view_appeal_candidates]
 }
+
+# BigQuery Table - Rail Lines (NARN)
+# Stores BTS NTAD North American Rail Network line geometry for proximity analysis
+resource "google_bigquery_table" "rail_lines" {
+  dataset_id          = google_bigquery_dataset.property_tax.dataset_id
+  table_id            = "rail_lines"
+  description         = "North American Rail Network (NARN) rail lines for Davidson County area"
+  deletion_protection = false
+
+  schema = jsonencode([
+    { name = "rail_id", type = "INTEGER", mode = "NULLABLE", description = "OBJECTID from NARN dataset" },
+    { name = "fra_arc_id", type = "INTEGER", mode = "NULLABLE", description = "FRA Arc ID" },
+    { name = "state_fips", type = "STRING", mode = "NULLABLE", description = "State FIPS code" },
+    { name = "county_fips", type = "STRING", mode = "NULLABLE", description = "County FIPS code" },
+    { name = "state_county_fips", type = "STRING", mode = "NULLABLE", description = "Combined state+county FIPS" },
+    { name = "state_abbrev", type = "STRING", mode = "NULLABLE", description = "State abbreviation" },
+    { name = "owner", type = "STRING", mode = "NULLABLE", description = "Primary railroad owner" },
+    { name = "owner2", type = "STRING", mode = "NULLABLE", description = "Secondary railroad owner" },
+    { name = "owner3", type = "STRING", mode = "NULLABLE", description = "Tertiary railroad owner" },
+    { name = "passenger_rail", type = "STRING", mode = "NULLABLE", description = "Passenger rail indicator (A=Amtrak, C=Commuter, etc.)" },
+    { name = "stracnet", type = "STRING", mode = "NULLABLE", description = "Strategic Rail Corridor Network indicator" },
+    { name = "tracks", type = "INTEGER", mode = "NULLABLE", description = "Number of tracks" },
+    { name = "miles", type = "FLOAT64", mode = "NULLABLE", description = "Segment length in miles" },
+    { name = "subdivision", type = "STRING", mode = "NULLABLE", description = "Railroad subdivision name" },
+    { name = "division", type = "STRING", mode = "NULLABLE", description = "Railroad division name" },
+    { name = "geom", type = "GEOGRAPHY", mode = "NULLABLE", description = "Rail line geometry (LineString)" },
+    { name = "load_timestamp", type = "TIMESTAMP", mode = "NULLABLE", description = "When the record was loaded" }
+  ])
+}
+
+# View: Parcel Rail Enrichment
+# Calculates distance from each parcel to nearest rail line with proximity flags
+resource "google_bigquery_table" "view_parcel_rail_enrichment" {
+  dataset_id = google_bigquery_dataset.property_tax.dataset_id
+  table_id   = "v_parcel_rail_enrichment"
+
+  view {
+    query          = <<-SQL
+      WITH parcel_points AS (
+        -- Create point geometry for each parcel from lat/lon
+        SELECT
+          ParID AS parcel_id,
+          PropAddr AS property_address,
+          LUDesc AS land_use,
+          TotlAppr AS total_appraisal,
+          Lat AS latitude,
+          Lon AS longitude,
+          ST_GEOGPOINT(Lon, Lat) AS parcel_point
+        FROM `${var.project_id}.${var.dataset_id}.davidson_parcels`
+        WHERE Lat IS NOT NULL AND Lon IS NOT NULL
+      ),
+      nearest_rail AS (
+        -- Find nearest rail line for each parcel
+        SELECT
+          p.parcel_id,
+          p.property_address,
+          p.land_use,
+          p.total_appraisal,
+          p.latitude,
+          p.longitude,
+          p.parcel_point,
+          r.rail_id AS nearest_rail_id,
+          r.owner AS nearest_rail_owner,
+          r.passenger_rail AS nearest_rail_type,
+          r.tracks AS nearest_rail_tracks,
+          ST_DISTANCE(p.parcel_point, r.geom) AS distance_to_rail_m
+        FROM parcel_points p
+        CROSS JOIN `${var.project_id}.${var.dataset_id}.rail_lines` r
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY p.parcel_id ORDER BY ST_DISTANCE(p.parcel_point, r.geom)) = 1
+      )
+      SELECT
+        parcel_id,
+        property_address,
+        land_use,
+        total_appraisal,
+        latitude,
+        longitude,
+        parcel_point,
+        nearest_rail_id,
+        nearest_rail_owner,
+        nearest_rail_type,
+        nearest_rail_tracks,
+        ROUND(distance_to_rail_m, 2) AS distance_to_rail_m,
+        ROUND(distance_to_rail_m * 3.28084, 2) AS distance_to_rail_ft,
+        distance_to_rail_m <= 100 AS within_100m_rail,
+        distance_to_rail_m <= 250 AS within_250m_rail,
+        distance_to_rail_m <= 500 AS within_500m_rail,
+        distance_to_rail_m <= 1000 AS within_1000m_rail
+      FROM nearest_rail
+    SQL
+    use_legacy_sql = false
+  }
+
+  depends_on = [
+    google_bigquery_table.davidson_parcels,
+    google_bigquery_table.rail_lines
+  ]
+}
