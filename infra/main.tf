@@ -626,3 +626,259 @@ resource "google_bigquery_table" "view_parcel_floodzone_enrichment" {
     google_bigquery_table.fema_floodzone
   ]
 }
+
+# BigQuery Table - Building Characteristics
+# Stores building footprint polygons with structure attributes from Nashville Open Data
+resource "google_bigquery_table" "davidson_building_characteristics" {
+  dataset_id          = google_bigquery_dataset.property_tax.dataset_id
+  table_id            = "davidson_building_characteristics"
+  description         = "Davidson County building characteristics with footprint geometry from Nashville Open Data"
+  deletion_protection = false
+
+  schema = jsonencode([
+    { name = "object_id", type = "INTEGER", mode = "NULLABLE", description = "ArcGIS object ID" },
+    { name = "feature_type", type = "STRING", mode = "NULLABLE", description = "Feature type" },
+    { name = "floor_number", type = "STRING", mode = "NULLABLE", description = "Floor number" },
+    { name = "apn", type = "STRING", mode = "NULLABLE", description = "Assessor Parcel Number" },
+    { name = "assessor_card_number", type = "INTEGER", mode = "NULLABLE", description = "Assessor card number" },
+    { name = "structure_type", type = "STRING", mode = "NULLABLE", description = "Type of structure" },
+    { name = "finished_area", type = "FLOAT64", mode = "NULLABLE", description = "Finished area in square feet" },
+    { name = "exterior", type = "STRING", mode = "NULLABLE", description = "Exterior material" },
+    { name = "year_built", type = "INTEGER", mode = "NULLABLE", description = "Year the structure was built" },
+    { name = "date_effective", type = "DATE", mode = "NULLABLE", description = "Effective date of record" },
+    { name = "parcel_id", type = "INTEGER", mode = "NULLABLE", description = "Parcel ID for joining to parcels table" },
+    { name = "shape_area", type = "FLOAT64", mode = "NULLABLE", description = "Shape area (sq meters)" },
+    { name = "shape_length", type = "FLOAT64", mode = "NULLABLE", description = "Shape perimeter length (meters)" },
+    { name = "geom", type = "GEOGRAPHY", mode = "NULLABLE", description = "Building footprint geometry (Polygon)" },
+    { name = "load_timestamp", type = "TIMESTAMP", mode = "NULLABLE", description = "When the record was loaded" }
+  ])
+}
+
+# View: Parcel Building Enrichment
+# Joins parcels to building characteristics
+resource "google_bigquery_table" "view_parcel_building_enrichment" {
+  dataset_id = google_bigquery_dataset.property_tax.dataset_id
+  table_id   = "v_parcel_building_enrichment"
+
+  view {
+    query          = <<-SQL
+      SELECT
+        p.OBJECTID,
+        p.STANPAR,
+        p.FEATURETYPE,
+        p.FLOORNUMBER,
+        p.ParID,
+        p.Tract,
+        p.Council,
+        p.TaxDist,
+        p.Owner,
+        p.OwnDate,
+        p.SalePrice,
+        p.OwnInstr,
+        p.OwnAddr1,
+        p.OwnAddr2,
+        p.OwnAddr3,
+        p.OwnCity,
+        p.OwnState,
+        p.OwnCountry,
+        p.OwnZip,
+        p.PropAddr,
+        p.PropHouse,
+        p.PropFraction,
+        p.PropStreet,
+        p.PropSuite,
+        p.PropCity,
+        p.PropState,
+        p.PropZip,
+        p.LegalDesc,
+        p.PropInstr,
+        p.PropDate,
+        p.Acres,
+        p.Front,
+        p.Side,
+        p.IsRegular,
+        p.LUCode,
+        p.LUDesc,
+        p.LandAppr,
+        p.ImprAppr,
+        p.TotlAppr,
+        p.Zoning,
+        p.Shape__Area AS parcel_shape_area,
+        p.Lat,
+        p.Lon,
+        p.load_timestamp AS parcel_load_timestamp,
+        b.object_id AS building_object_id,
+        b.feature_type AS building_feature_type,
+        b.floor_number AS building_floor_number,
+        b.apn,
+        b.assessor_card_number,
+        b.structure_type,
+        b.finished_area,
+        b.exterior,
+        b.year_built,
+        b.date_effective,
+        b.parcel_id AS building_parcel_id,
+        b.shape_area AS building_shape_area,
+        b.shape_length AS building_shape_length,
+        b.geom AS building_geom,
+        b.load_timestamp AS building_load_timestamp
+      FROM `${var.project_id}.${var.dataset_id}.davidson_parcels` p
+      LEFT JOIN `${var.project_id}.${var.dataset_id}.davidson_building_characteristics` b
+        ON p.STANPAR = b.apn
+    SQL
+    use_legacy_sql = false
+  }
+
+  depends_on = [
+    google_bigquery_table.davidson_parcels,
+    google_bigquery_table.davidson_building_characteristics
+  ]
+}
+
+# View: Condo Building Comparison
+# Groups condo units by building and enables within-building comparisons to find outliers
+resource "google_bigquery_table" "view_condo_comparison" {
+  dataset_id = google_bigquery_dataset.property_tax.dataset_id
+  table_id   = "v_condo_comparison"
+
+  view {
+    query          = <<-SQL
+      WITH condos AS (
+        -- Filter to condo units only
+        SELECT
+          ParID,
+          PropAddr,
+          PropHouse,
+          PropStreet,
+          PropSuite,
+          PropZip,
+          LUDesc,
+          TotlAppr,
+          LandAppr,
+          ImprAppr,
+          Acres,
+          Lat,
+          Lon,
+          SAFE_DIVIDE(TotlAppr, NULLIF(Acres, 0)) AS value_per_acre
+        FROM `${var.project_id}.${var.dataset_id}.davidson_parcels`
+        WHERE UPPER(TRIM(LUDesc)) LIKE '%CONDO%'
+          AND TotlAppr > 0
+          AND Lat IS NOT NULL
+          AND Lon IS NOT NULL
+      ),
+      buildings AS (
+        -- Create building identifier from address components
+        -- Also create a geo-cluster ID by rounding lat/lon to ~10m precision
+        SELECT
+          *,
+          CONCAT(
+            COALESCE(TRIM(PropHouse), ''), '|',
+            COALESCE(TRIM(PropStreet), ''), '|',
+            COALESCE(TRIM(PropZip), '')
+          ) AS building_key,
+          -- Geo cluster: round to 4 decimal places (~11m precision)
+          CONCAT(
+            CAST(ROUND(Lat, 4) AS STRING), ',',
+            CAST(ROUND(Lon, 4) AS STRING)
+          ) AS geo_cluster_id
+        FROM condos
+      ),
+      building_stats AS (
+        -- Calculate building-level statistics
+        SELECT
+          building_key,
+          COUNT(*) AS unit_count,
+          AVG(TotlAppr) AS building_avg_appraisal,
+          STDDEV(TotlAppr) AS building_stddev_appraisal,
+          APPROX_QUANTILES(TotlAppr, 100)[OFFSET(50)] AS building_median_appraisal,
+          APPROX_QUANTILES(TotlAppr, 100)[OFFSET(25)] AS building_p25_appraisal,
+          APPROX_QUANTILES(TotlAppr, 100)[OFFSET(75)] AS building_p75_appraisal,
+          MIN(TotlAppr) AS building_min_appraisal,
+          MAX(TotlAppr) AS building_max_appraisal,
+          AVG(Acres) AS building_avg_acres,
+          AVG(value_per_acre) AS building_avg_value_per_acre
+        FROM buildings
+        GROUP BY building_key
+        HAVING COUNT(*) >= 2  -- Only buildings with 2+ units for meaningful comparison
+      ),
+      geo_cluster_stats AS (
+        -- Calculate geo-cluster statistics as secondary grouping
+        SELECT
+          geo_cluster_id,
+          COUNT(*) AS geo_unit_count,
+          AVG(TotlAppr) AS geo_avg_appraisal,
+          APPROX_QUANTILES(TotlAppr, 100)[OFFSET(50)] AS geo_median_appraisal
+        FROM buildings
+        GROUP BY geo_cluster_id
+        HAVING COUNT(*) >= 2
+      )
+      SELECT
+        b.ParID,
+        b.PropAddr,
+        b.PropSuite,
+        b.PropZip,
+        b.LUDesc,
+        b.TotlAppr,
+        b.LandAppr,
+        b.ImprAppr,
+        b.Acres,
+        b.Lat,
+        b.Lon,
+        ROUND(b.value_per_acre, 2) AS value_per_acre,
+
+        -- Building identification
+        b.building_key,
+        b.geo_cluster_id,
+
+        -- Building statistics
+        s.unit_count AS building_unit_count,
+        ROUND(s.building_avg_appraisal, 2) AS building_avg_appraisal,
+        ROUND(s.building_median_appraisal, 2) AS building_median_appraisal,
+        ROUND(s.building_min_appraisal, 2) AS building_min_appraisal,
+        ROUND(s.building_max_appraisal, 2) AS building_max_appraisal,
+        ROUND(s.building_p25_appraisal, 2) AS building_p25_appraisal,
+        ROUND(s.building_p75_appraisal, 2) AS building_p75_appraisal,
+        ROUND(s.building_avg_value_per_acre, 2) AS building_avg_value_per_acre,
+
+        -- Within-building comparison metrics
+        ROUND((b.TotlAppr - s.building_avg_appraisal) / NULLIF(s.building_stddev_appraisal, 0), 2) AS building_z_score,
+        ROUND((b.TotlAppr - s.building_median_appraisal) / NULLIF(s.building_median_appraisal, 0) * 100, 1) AS pct_from_building_median,
+        ROUND(b.TotlAppr - s.building_median_appraisal, 2) AS diff_from_building_median,
+
+        -- Geo cluster comparison (secondary validation)
+        g.geo_unit_count,
+        ROUND(g.geo_median_appraisal, 2) AS geo_median_appraisal,
+        ROUND((b.TotlAppr - g.geo_median_appraisal) / NULLIF(g.geo_median_appraisal, 0) * 100, 1) AS pct_from_geo_median,
+
+        -- Outlier classification
+        CASE
+          WHEN s.building_stddev_appraisal IS NULL OR s.building_stddev_appraisal = 0 THEN 'UNIFORM'
+          WHEN (b.TotlAppr - s.building_avg_appraisal) / s.building_stddev_appraisal > 2 THEN 'HIGH_OUTLIER'
+          WHEN (b.TotlAppr - s.building_avg_appraisal) / s.building_stddev_appraisal > 1.5 THEN 'ABOVE_AVERAGE'
+          WHEN (b.TotlAppr - s.building_avg_appraisal) / s.building_stddev_appraisal < -2 THEN 'LOW_OUTLIER'
+          WHEN (b.TotlAppr - s.building_avg_appraisal) / s.building_stddev_appraisal < -1.5 THEN 'BELOW_AVERAGE'
+          ELSE 'NORMAL'
+        END AS building_assessment_flag,
+
+        -- IQR-based outlier detection (more robust to non-normal distributions)
+        CASE
+          WHEN b.TotlAppr > s.building_p75_appraisal + 1.5 * (s.building_p75_appraisal - s.building_p25_appraisal) THEN 'IQR_HIGH_OUTLIER'
+          WHEN b.TotlAppr < s.building_p25_appraisal - 1.5 * (s.building_p75_appraisal - s.building_p25_appraisal) THEN 'IQR_LOW_OUTLIER'
+          ELSE 'WITHIN_IQR'
+        END AS iqr_flag,
+
+        -- Estimated savings if assessed at building median
+        ROUND(
+          GREATEST(0, (b.TotlAppr - s.building_median_appraisal) * 0.25 * 0.03)
+        , 2) AS potential_annual_savings
+
+      FROM buildings b
+      JOIN building_stats s ON b.building_key = s.building_key
+      LEFT JOIN geo_cluster_stats g ON b.geo_cluster_id = g.geo_cluster_id
+      ORDER BY building_z_score DESC NULLS LAST
+    SQL
+    use_legacy_sql = false
+  }
+
+  depends_on = [google_bigquery_table.davidson_parcels]
+}
