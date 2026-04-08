@@ -18,7 +18,6 @@ Property tax assessments are often inconsistent and opaque. Many homeowners pay 
 ### Phase 1: MVP Analytics (Current)
 - [x] Extract and store Davidson County parcel data (~286k parcels)
 - [x] Basic outlier detection using z-scores within land use categories
-- [ ] Neighborhood-based comparison analytics
 - [ ] Assessment-to-sale-price ratio analysis
 - [ ] Appeal strength scoring system
 
