@@ -1,0 +1,58 @@
+Zoning_District,Zoning_District_Sub,Zoning_Code,Description
+Agricultural,,AG,Agricultural District
+Agricultural,,AR2a,Agricultural Residential
+Residential,Single-Family,RS80,"80,000 sq ft lot"
+Residential,Single-Family,RS40,"40,000 sq ft lot"
+Residential,Single-Family,RS30,"30,000 sq ft lot"
+Residential,Single-Family,RS20,"20,000 sq ft lot"
+Residential,Single-Family,RS15,"15,000 sq ft lot"
+Residential,Single-Family,RS10,"10,000 sq ft lot"
+Residential,Single-Family,RS7.5,"7,500 sq ft lot"
+Residential,Single-Family,RS7.5-A,"7,500 sq ft lot"
+Residential,Single-Family,RS5,"5,000 sq ft lot"
+Residential,Single-Family,RS5-A,"5,000 sq ft lot"
+Residential,Single-Family,RS3.75,"3,750 sq ft lot"
+Residential,Single-Family,RS3.75-A,"3,750 sq ft lot"
+Residential,One/Two Family,R80,"80,000 sq ft lot"
+Residential,One/Two Family,R40,"40,000 sq ft lot"
+Residential,One/Two Family,R30,"30,000 sq ft lot"
+Residential,One/Two Family,R20,"20,000 sq ft lot"
+Residential,One/Two Family,R15,"15,000 sq ft lot"
+Residential,One/Two Family,R10,"10,000 sq ft lot"
+Residential,One/Two Family,R8,"8,000 sq ft lot"
+Residential,One/Two Family,R8-A,"8,000 sq ft lot"
+Residential,One/Two Family,R6,"6,000 sq ft lot"
+Residential,One/Two Family,R6-A,"6,000 sq ft lot"
+Residential,Multi-Family,RM2,2 units/acre
+Residential,Multi-Family,RM4,4 units/acre
+Residential,Multi-Family,RM6,6 units/acre
+Residential,Multi-Family,RM9,9 units/acre
+Residential,Multi-Family,RM15,15 units/acre
+Residential,Multi-Family,RM20,20 units/acre
+Residential,Multi-Family,RM40,40 units/acre
+Residential,Multi-Family,RM60,60 units/acre
+Residential,Multi-Family,RM80-A,80 units/acre
+Residential,Multi-Family,RM100-A,100 units/acre
+Residential,Mobile Home,MHP,Mobile Home Park
+Mixed Use,,MUN,Mixed-Use Neighborhood
+Mixed Use,,MUL,Mixed-Use Limited
+Mixed Use,,MUG,Mixed-Use General
+Mixed Use,,MUI,Mixed-Use Intensive
+Office,,OR20,Office/Residential 20 units/acre
+Office,,OR40,Office/Residential 40 units/acre
+Office,,ON,Office Neighborhood
+Office,,OL,Office Limited
+Office,,OG,Office General
+Office,,ORI,Office/Residential Intensive
+Commercial,,CN,Commercial Neighborhood
+Commercial,,CL,Commercial Limited
+Commercial,,CS,Commercial Service
+Commercial,,CA,Commercial Attraction
+Commercial,,CF,Commercial Core Frame
+Downtown,,DTC,Downtown Code
+Shopping Center,,SCN,Shopping Center Neighborhood
+Shopping Center,,SCC,Shopping Center Community
+Shopping Center,,SCR,Shopping Center Regional
+Industrial,,IWD,Industrial Warehousing/Distribution
+Industrial,,IR,Industrial Restrictive
+Industrial,,IG,Industrial General
