@@ -223,3 +223,12 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+
+
+
+
+# DALLAS
+
+parcels/dallas/DCAD2026_CURRENT/
+
+.claude
