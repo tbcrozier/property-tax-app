@@ -26,6 +26,12 @@ floodzone/            # FEMA flood zone data
   load_floodzone.py   # Script to download FEMA NFHL data and load to BigQuery
   data/
     flood_zones.json  # Downloaded flood zone data (newline-delimited JSON)
+
+ratio_corrector/      # Residential/Commercial classification detector
+  load_zoning_ref.py  # Script to load Nashville zoning reference data
+  queries/
+    top_candidates.sql  # Top 100 candidates for manual review
+    summary.sql         # Summary statistics by LU code, zoning, score band
 ```
 
 ## Data Sources
@@ -126,12 +132,24 @@ python3 load_floodzone.py --show-fields
 python3 load_floodzone.py --load-bq --truncate
 ```
 
+### Load Zoning Reference Data
+```bash
+cd ratio_corrector
+
+# List all zoning codes
+python3 load_zoning_ref.py --list
+
+# Load zoning reference to BigQuery (truncate/replace)
+python3 load_zoning_ref.py --load-bq --truncate
+```
+
 ## BigQuery Resources
 - **Dataset**: `property_tax`
 - **Tables**:
   - `davidson_parcels` - Raw parcel data from Nashville assessor
   - `rail_lines` - NARN rail line geometry for proximity analysis
   - `fema_floodplain` - FEMA NFHL flood zone polygons for flood risk analysis
+  - `ref_nashville_zoning` - Nashville zoning code reference with categories and tax classifications
 - **Views**:
   - `v_assessment_by_land_use` - Summary stats by land use type
   - `v_assessment_outliers` - Parcels with z-score > 2 or < -2 (potential over/under assessed)
@@ -141,6 +159,7 @@ python3 load_floodzone.py --load-bq --truncate
   - `v_single_family_appeals` - Filtered view for single family homes with score > 20
   - `v_parcel_rail_enrichment` - Distance to nearest rail line with proximity flags (100m/250m/500m/1000m)
   - `v_parcel_floodzone_enrichment` - Flood zone status for each parcel with risk classification
+  - `v_residential_use_candidates` - Detects residential properties potentially taxed as commercial
 
 
 Table public-data-dev:property_tax.davidson_parcels
@@ -209,4 +228,38 @@ Properties are scored based on multiple signals:
 - `MODERATE_CANDIDATE` - z-score > 1.5 OR >30% above zip median
 - `WORTH_REVIEWING` - z-score > 1 OR >15% above zip median
 - `LIKELY_FAIR` - Assessment appears reasonable
+
+
+## Residential Use Candidates (Ratio Corrector)
+
+Detects properties that appear to be **residential in use** but may be **taxed like commercial** property. Tennessee property classification is based on actual use, not zoning.
+
+### Detection Signals
+The view `v_residential_use_candidates` uses multiple signals:
+- **Owner occupancy** (+15 pts) - Owner mailing address matches property address
+- **Commercial zoning context** (+15 pts) - Property is in commercial/office/industrial zoning
+- **Residential neighbors** (+25 pts if ≥80%) - Percentage of nearby parcels with residential LU codes
+- **Ambiguous LU code** (+10 pts) - LU code 019 (Combo/Misc) needs review
+- **Residential LU in commercial zone** (+20 pts) - Strong signal for misclassification
+- **Mixed use with residential appearance** (+10 pts)
+
+### Review Reasons
+- `Residential LU + commercial zoning + owner occupied` - Strongest signal
+- `Residential LU code in commercial zoning`
+- `Combo/Misc LU + owner occupied + residential neighbors`
+- `Commercial zone surrounded by residential`
+- `Mixed use zoning + owner occupied`
+
+### Tax Savings Calculation
+Uses Davidson County combined tax rate (~3.254%):
+- Commercial assessment ratio: 40%
+- Residential assessment ratio: 25%
+- Potential savings: `TotlAppr × (0.40 - 0.25) × 0.03254`
+
+### Assumptions
+1. LU codes starting with 01x, 08x are residential
+2. LU codes 02x-07x are commercial/industrial
+3. LU codes 09x, 1xx are exempt (excluded)
+4. Zoning is context only, not authoritative for tax classification
+5. Neighborhood radius is 500 meters for neighbor calculation
 
