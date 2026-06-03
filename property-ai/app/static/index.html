@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Property Tax Analyst — Nashville, TN</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Marked.js (markdown rendering) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Highlight.js (SQL syntax highlighting) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50: '#f0f9ff', 500: '#0ea5e9', 600: '#0284c7', 700: '#0369a1' }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    /* Markdown rendering inside chat bubbles */
+    .prose-chat table { border-collapse: collapse; width: 100%; margin: 0.75rem 0; font-size: 0.8rem; }
+    .prose-chat th { background: #1e3a5f; color: #e2e8f0; padding: 6px 10px; text-align: left; }
+    .prose-chat td { border: 1px solid #334155; padding: 5px 10px; }
+    .prose-chat tr:nth-child(even) td { background: #1e293b; }
+    .prose-chat tr:hover td { background: #1e3a5f; }
+    .prose-chat h1, .prose-chat h2, .prose-chat h3 { color: #93c5fd; font-weight: 600; margin: 0.75rem 0 0.4rem; }
+    .prose-chat h3 { font-size: 0.95rem; }
+    .prose-chat p { margin: 0.4rem 0; line-height: 1.6; }
+    .prose-chat ul, .prose-chat ol { padding-left: 1.25rem; margin: 0.4rem 0; }
+    .prose-chat li { margin: 0.2rem 0; }
+    .prose-chat strong { color: #93c5fd; }
+    .prose-chat code:not(.hljs) { background: #1e293b; padding: 1px 5px; border-radius: 3px; font-size: 0.8rem; color: #7dd3fc; }
+    .prose-chat pre { margin: 0.75rem 0; border-radius: 6px; overflow-x: auto; }
+    .prose-chat blockquote { border-left: 3px solid #0ea5e9; padding-left: 0.75rem; color: #94a3b8; margin: 0.5rem 0; }
+
+    /* Custom scrollbar */
+    #chat-container::-webkit-scrollbar { width: 6px; }
+    #chat-container::-webkit-scrollbar-track { background: #0f172a; }
+    #chat-container::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+    /* Typing indicator */
+    .typing-dot { animation: typing 1.2s infinite; }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes typing { 0%, 100% { opacity: 0.2; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1); } }
+
+    /* Fade in messages */
+    .msg-fade { animation: fadeUp 0.25s ease-out; }
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+
+<body class="bg-slate-950 text-slate-200 h-screen flex flex-col overflow-hidden">
+
+  <!-- Header -->
+  <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex items-center gap-3 shrink-0">
+    <div class="w-9 h-9 rounded-lg bg-brand-600 flex items-center justify-center text-white font-bold text-sm">PT</div>
+    <div>
+      <h1 class="font-semibold text-white text-base leading-tight">Property Tax Analyst</h1>
+      <p class="text-xs text-slate-400">Davidson County, Nashville TN — AI-powered assessment analysis</p>
+    </div>
+    <div class="ml-auto flex items-center gap-2">
+      <span id="status-dot" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+      <span id="status-text" class="text-xs text-slate-400">Connected</span>
+    </div>
+  </header>
+
+  <!-- Chat area -->
+  <div id="chat-container" class="flex-1 overflow-y-auto px-4 py-6 space-y-6">
+
+    <!-- Welcome message -->
+    <div class="msg-fade flex gap-3 max-w-4xl mx-auto">
+      <div class="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center text-white text-xs font-bold shrink-0 mt-1">AI</div>
+      <div class="flex-1">
+        <div class="bg-slate-800 rounded-2xl rounded-tl-sm px-5 py-4 prose-chat text-sm text-slate-200">
+          <p>Hello! I'm your Davidson County property tax analyst. I can help you:</p>
+          <ul>
+            <li><strong>Find over-assessed parcels</strong> — "list top 10 over-assessed residential parcels in 37206"</li>
+            <li><strong>Look up a specific parcel</strong> — "tell me about parcel 04316019700"</li>
+            <li><strong>Detect anomalies</strong> — "find anomalous commercial properties"</li>
+            <li><strong>Generate reports</strong> — "generate a report on zoning mismatches"</li>
+            <li><strong>Explain concepts</strong> — "what is an appeal score?"</li>
+          </ul>
+          <p class="mt-2 text-slate-400 text-xs">All answers are grounded in live database data.</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Input bar -->
+  <div class="shrink-0 bg-slate-900 border-t border-slate-800 px-4 py-4">
+    <div class="max-w-4xl mx-auto flex gap-3 items-end">
+      <div class="flex-1 bg-slate-800 rounded-xl border border-slate-700 focus-within:border-brand-500 transition-colors">
+        <textarea
+          id="user-input"
+          rows="1"
+          placeholder="Ask about Davidson County parcels, assessments, anomalies..."
+          class="w-full bg-transparent px-4 py-3 text-sm text-slate-200 placeholder-slate-500 resize-none focus:outline-none max-h-40 leading-relaxed"
+          style="overflow-y: hidden;"
+        ></textarea>
+      </div>
+      <button
+        id="send-btn"
+        onclick="sendMessage()"
+        class="w-11 h-11 rounded-xl bg-brand-600 hover:bg-brand-500 disabled:bg-slate-700 disabled:cursor-not-allowed transition-colors flex items-center justify-center shrink-0"
+      >
+        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+        </svg>
+      </button>
+    </div>
+    <p class="text-center text-xs text-slate-600 mt-2">Press Enter to send · Shift+Enter for new line</p>
+  </div>
+
+  <script>
+    // ── State ────────────────────────────────────────────────────────────────
+    const API_BASE = window.location.origin;
+    let conversationHistory = [];
+    let isLoading = false;
+    let activeCharts = [];
+
+    // ── Marked config ────────────────────────────────────────────────────────
+    marked.setOptions({
+      breaks: true,
+      gfm: true,
+    });
+
+    // ── Auto-resize textarea ─────────────────────────────────────────────────
+    const textarea = document.getElementById('user-input');
+    textarea.addEventListener('input', () => {
+      textarea.style.height = 'auto';
+      textarea.style.height = Math.min(textarea.scrollHeight, 160) + 'px';
+    });
+
+    textarea.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    // ── Scroll to bottom ─────────────────────────────────────────────────────
+    function scrollToBottom() {
+      const container = document.getElementById('chat-container');
+      container.scrollTop = container.scrollHeight;
+    }
+
+    // ── Typing indicator ─────────────────────────────────────────────────────
+    function showTyping() {
+      const container = document.getElementById('chat-container');
+      const el = document.createElement('div');
+      el.id = 'typing-indicator';
+      el.className = 'msg-fade flex gap-3 max-w-4xl mx-auto';
+      el.innerHTML = `
+        <div class="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center text-white text-xs font-bold shrink-0 mt-1">AI</div>
+        <div class="bg-slate-800 rounded-2xl rounded-tl-sm px-5 py-4 flex gap-1.5 items-center">
+          <span class="typing-dot w-2 h-2 rounded-full bg-slate-400 block"></span>
+          <span class="typing-dot w-2 h-2 rounded-full bg-slate-400 block"></span>
+          <span class="typing-dot w-2 h-2 rounded-full bg-slate-400 block"></span>
+        </div>
+      `;
+      container.appendChild(el);
+      scrollToBottom();
+    }
+
+    function hideTyping() {
+      const el = document.getElementById('typing-indicator');
+      if (el) el.remove();
+    }
+
+    // ── Render user message ──────────────────────────────────────────────────
+    function appendUserMessage(text) {
+      const container = document.getElementById('chat-container');
+      const el = document.createElement('div');
+      el.className = 'msg-fade flex justify-end max-w-4xl mx-auto';
+      el.innerHTML = `
+        <div class="max-w-xl bg-brand-700 rounded-2xl rounded-tr-sm px-5 py-3 text-sm text-white whitespace-pre-wrap leading-relaxed">${escapeHtml(text)}</div>
+      `;
+      container.appendChild(el);
+      scrollToBottom();
+    }
+
+    // ── Render AI message ────────────────────────────────────────────────────
+    function appendAIMessage(data) {
+      const container = document.getElementById('chat-container');
+      const msgId = 'msg-' + Date.now();
+      const el = document.createElement('div');
+      el.id = msgId;
+      el.className = 'msg-fade flex gap-3 max-w-4xl mx-auto';
+
+      const htmlAnswer = marked.parse(data.answer || '');
+
+      // Build metadata badges
+      let metaBadges = '';
+      if (data.result_count != null && data.result_count > 0) {
+        metaBadges += `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-emerald-900/50 text-emerald-400 border border-emerald-800">
+          <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M3 12v3c0 1.657 3.134 3 7 3s7-1.343 7-3v-3c0 1.657-3.134 3-7 3s-7-1.343-7-3z"/><path d="M3 7v3c0 1.657 3.134 3 7 3s7-1.343 7-3V7c0 1.657-3.134 3-7 3S3 8.657 3 7z"/><path d="M17 5c0 1.657-3.134 3-7 3S3 6.657 3 5s3.134-3 7-3 7 1.343 7 3z"/></svg>
+          ${data.result_count} rows
+        </span>`;
+      }
+      if (data.query_id) {
+        metaBadges += `<span class="text-xs text-slate-500">query #${data.query_id}</span>`;
+      }
+
+      // Sources
+      let sourcesHtml = '';
+      if (data.sources && data.sources.length > 0) {
+        const unique = [...new Set(data.sources)];
+        sourcesHtml = `
+          <div class="mt-3 pt-3 border-t border-slate-700 flex flex-wrap gap-1.5 items-center">
+            <span class="text-xs text-slate-500">Sources:</span>
+            ${unique.map(s => `<span class="text-xs px-2 py-0.5 bg-slate-700 rounded text-slate-400">${s}</span>`).join('')}
+          </div>`;
+      }
+
+      // SQL collapsible
+      let sqlHtml = '';
+      if (data.sql_used) {
+        const sqlId = 'sql-' + Date.now();
+        sqlHtml = `
+          <div class="mt-3 pt-3 border-t border-slate-700">
+            <button onclick="toggleSql('${sqlId}')" class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-brand-400 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+              View SQL
+              <svg id="${sqlId}-chevron" class="w-3 h-3 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+            </button>
+            <div id="${sqlId}" class="hidden mt-2">
+              <pre class="rounded-lg text-xs overflow-x-auto"><code class="language-sql">${escapeHtml(data.sql_used)}</code></pre>
+            </div>
+          </div>`;
+      }
+
+      // Chart placeholder (rendered after DOM insertion)
+      let chartHtml = '';
+      const chartId = 'chart-' + Date.now();
+      if (data.result_count > 0 && data.sql_used) {
+        chartHtml = `
+          <div class="mt-3 pt-3 border-t border-slate-700">
+            <div id="${chartId}-container" class="hidden">
+              <canvas id="${chartId}" class="max-h-64"></canvas>
+            </div>
+          </div>`;
+      }
+
+      el.innerHTML = `
+        <div class="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center text-white text-xs font-bold shrink-0 mt-1">AI</div>
+        <div class="flex-1 min-w-0">
+          <div class="bg-slate-800 rounded-2xl rounded-tl-sm px-5 py-4">
+            <div class="prose-chat text-sm text-slate-200">${htmlAnswer}</div>
+            ${chartHtml}
+            ${sourcesHtml}
+            ${sqlHtml}
+            ${metaBadges ? `<div class="mt-2 flex items-center gap-2">${metaBadges}</div>` : ''}
+          </div>
+        </div>
+      `;
+
+      container.appendChild(el);
+
+      // Highlight SQL
+      el.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+
+      // Try to render chart from answer table data
+      if (data.result_count > 0 && data.sql_used) {
+        tryRenderChart(data, chartId);
+      }
+
+      scrollToBottom();
+    }
+
+    // ── Toggle SQL block ─────────────────────────────────────────────────────
+    function toggleSql(id) {
+      const el = document.getElementById(id);
+      const chevron = document.getElementById(id + '-chevron');
+      el.classList.toggle('hidden');
+      chevron.style.transform = el.classList.contains('hidden') ? '' : 'rotate(180deg)';
+    }
+
+    // ── Chart rendering ──────────────────────────────────────────────────────
+    function tryRenderChart(data, chartId) {
+      // Parse markdown table from the answer to extract chart data
+      const tableRegex = /\|(.+)\|\n\|[-| :]+\|\n((?:\|.+\|\n?)+)/g;
+      const match = tableRegex.exec(data.answer || '');
+      if (!match) return;
+
+      const headers = match[1].split('|').map(h => h.trim()).filter(Boolean);
+      const rows = match[2].trim().split('\n').map(row =>
+        row.split('|').map(c => c.trim()).filter(Boolean)
+      );
+
+      if (rows.length < 2) return;
+
+      // Find a numeric column for the chart value
+      const labelCol = 0;
+      let valueCol = -1;
+      let valueName = '';
+
+      const numericCols = ['appeal_score', 'score', 'totl_appr', 'value', 'count',
+                           'pct_above_zip_pct', 'result_count', 'avg', 'total'];
+      for (let i = 1; i < headers.length; i++) {
+        const h = headers[i].toLowerCase();
+        if (numericCols.some(nc => h.includes(nc)) || !isNaN(parseFloat(rows[0][i]))) {
+          valueCol = i;
+          valueName = headers[i];
+          break;
+        }
+      }
+      if (valueCol === -1) return;
+
+      const labels = rows.map(r => (r[labelCol] || '').slice(0, 20));
+      const values = rows.map(r => parseFloat((r[valueCol] || '0').replace(/[$,%]/g, '')) || 0);
+
+      const container = document.getElementById(chartId + '-container');
+      if (!container) return;
+      container.classList.remove('hidden');
+
+      const ctx = document.getElementById(chartId).getContext('2d');
+      const chart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            label: valueName,
+            data: values,
+            backgroundColor: 'rgba(14, 165, 233, 0.6)',
+            borderColor: 'rgba(14, 165, 233, 1)',
+            borderWidth: 1,
+            borderRadius: 4,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { labels: { color: '#94a3b8', font: { size: 11 } } },
+            tooltip: {
+              backgroundColor: '#1e293b',
+              titleColor: '#e2e8f0',
+              bodyColor: '#94a3b8',
+              borderColor: '#334155',
+              borderWidth: 1,
+            }
+          },
+          scales: {
+            x: {
+              ticks: { color: '#64748b', font: { size: 10 }, maxRotation: 45 },
+              grid: { color: '#1e293b' }
+            },
+            y: {
+              ticks: { color: '#64748b', font: { size: 10 } },
+              grid: { color: '#1e293b' }
+            }
+          }
+        }
+      });
+      activeCharts.push(chart);
+    }
+
+    // ── Send message ─────────────────────────────────────────────────────────
+    async function sendMessage() {
+      if (isLoading) return;
+
+      const input = document.getElementById('user-input');
+      const text = input.value.trim();
+      if (!text) return;
+
+      // Reset input
+      input.value = '';
+      input.style.height = 'auto';
+
+      // Add to history and render
+      conversationHistory.push({ role: 'user', content: text });
+      appendUserMessage(text);
+
+      // Lock UI
+      isLoading = true;
+      document.getElementById('send-btn').disabled = true;
+      setStatus('thinking', 'Thinking...');
+      showTyping();
+
+      try {
+        const response = await fetch(`${API_BASE}/chat/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: conversationHistory }),
+        });
+
+        if (!response.ok) {
+          const err = await response.text();
+          throw new Error(`${response.status}: ${err}`);
+        }
+
+        const data = await response.json();
+        hideTyping();
+
+        // Add assistant reply to history
+        conversationHistory.push({ role: 'assistant', content: data.answer });
+
+        appendAIMessage(data);
+        setStatus('online', 'Connected');
+
+      } catch (err) {
+        hideTyping();
+        appendErrorMessage(err.message);
+        setStatus('error', 'Error');
+      } finally {
+        isLoading = false;
+        document.getElementById('send-btn').disabled = false;
+        input.focus();
+      }
+    }
+
+    // ── Error message ────────────────────────────────────────────────────────
+    function appendErrorMessage(msg) {
+      const container = document.getElementById('chat-container');
+      const el = document.createElement('div');
+      el.className = 'msg-fade flex gap-3 max-w-4xl mx-auto';
+      el.innerHTML = `
+        <div class="w-8 h-8 rounded-full bg-red-800 flex items-center justify-center text-white text-xs font-bold shrink-0 mt-1">!</div>
+        <div class="bg-red-950 border border-red-800 rounded-2xl rounded-tl-sm px-5 py-4 text-sm text-red-300">
+          <strong>Error:</strong> ${escapeHtml(msg)}
+        </div>
+      `;
+      container.appendChild(el);
+      scrollToBottom();
+    }
+
+    // ── Status indicator ─────────────────────────────────────────────────────
+    function setStatus(state, text) {
+      const dot = document.getElementById('status-dot');
+      const label = document.getElementById('status-text');
+      label.textContent = text;
+      dot.className = 'w-2 h-2 rounded-full ' + {
+        online:   'bg-emerald-400',
+        thinking: 'bg-amber-400 animate-pulse',
+        error:    'bg-red-400',
+      }[state];
+    }
+
+    // ── Escape HTML ──────────────────────────────────────────────────────────
+    function escapeHtml(str) {
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+    }
+
+    // ── Focus input on load ──────────────────────────────────────────────────
+    window.addEventListener('load', () => {
+      document.getElementById('user-input').focus();
+    });
+  </script>
+</body>
+</html>

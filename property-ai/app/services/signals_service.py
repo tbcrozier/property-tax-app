@@ -25,17 +25,33 @@ async def compute_parcel_signals(db: AsyncSession) -> int:
             WHERE acres > 0
               AND totl_appr > 0
         ),
+        zip_stats AS (
+            SELECT
+                lu_code,
+                prop_zip,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY vpa) AS zip_median,
+                COUNT(*) AS zip_peer_count
+            FROM base
+            GROUP BY lu_code, prop_zip
+        ),
+        lu_stats AS (
+            SELECT
+                lu_code,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY vpa) AS lu_median
+            FROM base
+            GROUP BY lu_code
+        ),
         peer_stats AS (
             SELECT
-                *,
-                AVG(vpa) OVER (PARTITION BY lu_code, prop_zip)           AS zip_avg,
-                STDDEV(vpa) OVER (PARTITION BY lu_code, prop_zip)        AS zip_std,
-                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY vpa)
-                    OVER (PARTITION BY lu_code, prop_zip)                AS zip_median,
-                COUNT(*) OVER (PARTITION BY lu_code, prop_zip)           AS zip_peer_count,
-                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY vpa)
-                    OVER (PARTITION BY lu_code)                          AS lu_median
-            FROM base
+                b.*,
+                AVG(b.vpa) OVER (PARTITION BY b.lu_code, b.prop_zip)    AS zip_avg,
+                STDDEV(b.vpa) OVER (PARTITION BY b.lu_code, b.prop_zip) AS zip_std,
+                zs.zip_median,
+                zs.zip_peer_count,
+                ls.lu_median
+            FROM base b
+            JOIN zip_stats zs ON b.lu_code = zs.lu_code AND b.prop_zip = zs.prop_zip
+            JOIN lu_stats ls ON b.lu_code = ls.lu_code
         ),
         scored AS (
             SELECT
@@ -61,10 +77,24 @@ async def compute_parcel_signals(db: AsyncSession) -> int:
                     WHEN sale_price > 0 AND totl_appr > sale_price
                     THEN TRUE ELSE FALSE
                 END                                                      AS assessed_above_sale,
-                -- Flag zoning/lu mismatch: residential lu but commercial zoning or vice versa
+                -- Flag zoning/lu mismatch using Davidson County numeric lu_codes
+                -- Residential lu_codes: 010-019 (vacant res, SFR, duplex, triplex, condo, etc.)
+                -- Commercial lu_codes:  020-069 (retail, office, restaurant, warehouse, etc.)
+                -- Industrial lu_codes:  070-079 (vacant industrial, light/heavy manufacturing)
+                -- Agricultural/rural:   080-089 (vacant rural, single family rural)
+                -- Residential zoning prefixes: R, RS, RM, DTC (mixed but res-dominant), SP
+                -- Commercial zoning prefixes:  C, OL, ON, OG, MUN, CF, IWD, CS, CA
+                -- Industrial zoning prefixes:  I, M
                 CASE
-                    WHEN lu_code LIKE 'R%' AND zoning NOT LIKE 'R%' THEN TRUE
-                    WHEN lu_code LIKE 'C%' AND zoning NOT LIKE 'C%' THEN TRUE
+                    -- Residential land use (010-019) in clearly non-residential zoning
+                    WHEN lu_code BETWEEN '010' AND '019'
+                         AND zoning ~ '^(C|OL|ON|OG|IWD|CS|CA|I[^R]|MUN)'       THEN TRUE
+                    -- Commercial land use (020-069) in clearly residential-only zoning
+                    WHEN lu_code BETWEEN '020' AND '069'
+                         AND zoning ~ '^(RS|RM[^U]|R[0-9])'                      THEN TRUE
+                    -- Industrial land use (070-079) in residential or commercial zoning
+                    WHEN lu_code BETWEEN '070' AND '079'
+                         AND zoning ~ '^(RS|RM|R[0-9]|C[^F]|OL|ON|OG)'          THEN TRUE
                     ELSE FALSE
                 END                                                      AS zoning_lu_mismatch
             FROM peer_stats

@@ -7,6 +7,7 @@ from app.services.loader_service import (
     load_building_characteristics_from_api,
     load_parcels_from_api,
 )
+from app.services.enrichment_service import compute_all_enrichments, reset_enrichments_flag
 from app.services.signals_service import compute_parcel_signals, reset_signals_flag
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -42,3 +43,10 @@ async def recompute_signals(db: AsyncSession = Depends(get_db)):
     reset_signals_flag()
     count = await compute_parcel_signals(db)
     return {"computed": count}
+
+
+@router.post("/compute-enrichments")
+async def trigger_compute_enrichments(db: AsyncSession = Depends(get_db)):
+    result = await compute_all_enrichments(db)
+    reset_enrichments_flag()
+    return result

@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     database_url: str
     database_url_sync: str
     ollama_base_url: str = "http://localhost:11434"
-    ollama_llm_model: str = "qwen2.5-coder:7b"
+    ollama_llm_model: str = "qwen2.5:14b"
     ollama_embed_model: str = "nomic-embed-text"
     debug: bool = False
 

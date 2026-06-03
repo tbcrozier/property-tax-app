@@ -64,6 +64,13 @@ async def search_documents(
     query: str,
     top_k: int = 5,
 ) -> list[dict]:
+    """
+    Search documents using vector similarity with optimized HNSW indexing.
+    
+    Uses HNSW (Hierarchical Navigable Small World) for efficient approximate 
+    nearest neighbor search, providing better performance than exact search
+    while maintaining high accuracy.
+    """
     embedding = await embed_text(query)
     emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
@@ -84,3 +91,25 @@ async def search_documents(
         {"title": r.title, "source": r.source, "content": r.content, "distance": r.distance}
         for r in rows
     ]
+
+
+async def optimize_vector_indexes(db: AsyncSession) -> None:
+    """
+    Optimize vector indexes after bulk embedding operations.
+    
+    This ensures that HNSW and IVFFlat indexes are properly built and
+    statistics are updated for optimal query performance.
+    """
+    try:
+        # Reindex HNSW index for optimal performance
+        await db.execute(text("REINDEX INDEX ix_documents_embedding_hnsw"))
+        
+        # Update table statistics for query planner
+        await db.execute(text("ANALYZE documents"))
+        
+        # Optional: Reindex IVFFlat if using that as fallback
+        await db.execute(text("REINDEX INDEX ix_documents_embedding_ivfflat"))
+        
+    except Exception as e:
+        print(f"Warning: Index optimization failed: {e}")
+        # Don't fail the entire operation if optimization fails

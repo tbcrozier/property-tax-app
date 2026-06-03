@@ -1,247 +1,130 @@
+# Rail Line Proximity — Davidson County Property Analysis
 
+## Overview
 
-# Handoff Document for Claude Code
+Rail line proximity is a **negative externality** for residential and some commercial properties.
+Properties within 100–500m of active rail lines may be under-assessed relative to peers farther away,
+or may have legitimate appeal arguments based on noise/vibration impacts on market value.
 
-## Project: Rail Line Proximity Enrichment for Davidson County Parcels (BigQuery)
-
-## Objective
-
-I already have **property assessor data in BigQuery** for Davidson County. I want to enrich it with **railroad / train track location data** so I can determine how close each property is to the nearest rail line.
-
-The goal is to create a workflow that:
-
-1. loads rail line data covering **Davidson County, TN**
-2. stores it in BigQuery as `GEOGRAPHY`
-3. creates a **view** that calculates parcel-level proximity to the nearest rail line
-4. optionally adds boolean thresholds like “within 100m / 250m / 500m of rail”
-
-A strong candidate public source is the **Bureau of Transportation Statistics National Transportation Atlas Database / North American Rail Network (NARN) Rail Lines** dataset. BTS states NTAD data is publicly downloadable in formats including Shapefile and GeoJSON, and the NARN Rail Lines dataset includes ownership and geographic reference information. ([Bureau of Transportation Statistics][1])
+Rail line data is available in the `rail_lines` table (PostGIS geometry).
 
 ---
 
-## What I want built
+## Database Table: rail_lines
 
-I want a simple, practical implementation that:
-
-* uses a public rail line dataset
-* narrows it to Davidson County or the Nashville area
-* loads the rail geometry into BigQuery
-* computes parcel-to-rail distance using BigQuery GIS
-* produces a final view for downstream analysis
-
----
-
-## Desired Output
-
-### View: `parcel_rail_enrichment`
-
-Fields should include at least:
-
-* `parcel_id`
-* `latitude`
-* `longitude`
-* `parcel_point` (`GEOGRAPHY`)
-* `distance_to_rail_m`
-* `within_100m_rail`
-* `within_250m_rail`
-* `within_500m_rail`
-* optional nearest rail attributes, if available:
-
-  * `nearest_rail_owner`
-  * `nearest_rail_type`
-  * `nearest_rail_id`
-
-If my parcel table already has a point or centroid field, use it. Otherwise, create one from lat/long.
+| Column         | Type    | Description |
+|---------------|---------|-------------|
+| owner         | TEXT    | Railroad company name (e.g. CSX, NS, Tennessee Central) |
+| passenger_rail | BOOL   | TRUE if used for passenger service (Amtrak, commuter) |
+| tracks        | INT     | Number of tracks |
+| miles         | FLOAT   | Segment length in miles |
+| geom          | GEOMETRY(MULTILINESTRING, 4326) | Rail line geometry |
 
 ---
 
-## Current Context
+## How Rail Proximity Affects Property Values
 
-* Property assessor data is already in **BigQuery**
-* I want to start with **point-based parcel location** using lat/long
-* This is for a **property tax analysis application**
-* The analytical idea is that proximity to rail may be a negative externality that could later be used in comp analysis or appeal narratives
-
----
-
-## Specific Tasks for Claude Code
-
-### 1. Identify and recommend the rail dataset
-
-Please confirm and recommend a practical public dataset for rail lines, ideally starting with:
-
-* **BTS / NTAD / NARN Rail Lines**
-
-BTS publishes NTAD as a public geospatial transportation database, and recent BTS notices say NTAD data is available in formats such as Shapefile and GeoJSON. ([Bureau of Transportation Statistics][2])
-
-Please determine:
-
-* the exact dataset to use
-* how to download it
-* whether to clip/filter to Tennessee or Davidson County before loading
-* what attributes are useful to preserve
+- Within **100m**: Significant noise/vibration impact — may suppress residential values 5–15%
+- Within **250m**: Moderate impact — relevant for quiet residential neighborhoods
+- Within **500m**: Mild impact — primarily relevant for high-sensitivity uses
+- Within **1000m**: Minimal direct impact; mainly relevant if freight rail is very active
 
 ---
 
-### 2. Data ingestion plan
+## Querying Rail Proximity (PostgreSQL + PostGIS)
 
-Design a minimal-friction ingestion approach. Consider:
-
-* Python with GeoPandas
-* `ogr2ogr`
-* loading GeoJSON into BigQuery
-* filtering rail lines to Davidson County before load vs after load
-
-I want a workflow I can realistically run locally and later automate.
-
----
-
-### 3. BigQuery table design
-
-Please design a raw or staged table, such as:
-
-`rail_lines_raw`
-
-Suggested fields:
-
-* `rail_id`
-* `geom` (`GEOGRAPHY`)
-* `owner`
-* `rail_type`
-* any other useful source fields
-
-Please advise whether geometry simplification is recommended.
-
----
-
-### 4. Parcel point creation
-
-Assume my parcel table looks something like:
-
-`parcels`
-
-Fields:
-
-* `parcel_id`
-* `latitude`
-* `longitude`
-
-Please generate SQL to create the parcel point with:
-
+### Find parcels within 500m of any rail line:
 ```sql
-ST_GEOGPOINT(longitude, latitude)
+SELECT
+    p.par_id,
+    p.prop_addr,
+    p.prop_zip,
+    p.lu_code,
+    p.totl_appr,
+    MIN(ST_Distance(
+        ST_Transform(p.location, 3857),
+        ST_Transform(r.geom, 3857)
+    )) AS distance_to_rail_m
+FROM parcels p
+CROSS JOIN rail_lines r
+WHERE p.location IS NOT NULL
+GROUP BY p.par_id, p.prop_addr, p.prop_zip, p.lu_code, p.totl_appr
+HAVING MIN(ST_Distance(
+    ST_Transform(p.location, 3857),
+    ST_Transform(r.geom, 3857)
+)) <= 500
+ORDER BY distance_to_rail_m
+LIMIT 50
+```
+
+### Find nearest rail line for a specific parcel:
+```sql
+SELECT
+    p.par_id,
+    p.prop_addr,
+    r.owner AS rail_owner,
+    r.passenger_rail,
+    r.tracks,
+    ST_Distance(
+        ST_Transform(p.location, 3857),
+        ST_Transform(r.geom, 3857)
+    ) AS distance_m
+FROM parcels p
+CROSS JOIN rail_lines r
+WHERE p.par_id = '<parcel_id>'
+ORDER BY distance_m
+LIMIT 1
+```
+
+### Rail proximity + appeal score (combined enrichment):
+```sql
+SELECT
+    p.par_id,
+    p.prop_addr,
+    p.prop_zip,
+    p.lu_code,
+    p.totl_appr,
+    ps.appeal_score,
+    ps.recommendation,
+    ROUND(MIN(ST_Distance(
+        ST_Transform(p.location, 3857),
+        ST_Transform(r.geom, 3857)
+    ))::numeric, 0) AS distance_to_rail_m,
+    MIN(ST_Distance(
+        ST_Transform(p.location, 3857),
+        ST_Transform(r.geom, 3857)
+    )) <= 250 AS within_250m_rail
+FROM parcels p
+JOIN parcel_signals ps ON ps.par_id = p.par_id
+CROSS JOIN rail_lines r
+WHERE p.location IS NOT NULL
+  AND ps.recommendation IN ('STRONG_CANDIDATE', 'MODERATE_CANDIDATE')
+GROUP BY p.par_id, p.prop_addr, p.prop_zip, p.lu_code, p.totl_appr,
+         ps.appeal_score, ps.recommendation
+HAVING MIN(ST_Distance(
+    ST_Transform(p.location, 3857),
+    ST_Transform(r.geom, 3857)
+)) <= 500
+ORDER BY ps.appeal_score DESC
+LIMIT 25
 ```
 
 ---
 
-### 5. Core spatial logic
+## Appeal Narrative: Using Rail Proximity
 
-I want actual BigQuery SQL for:
-
-#### A. Nearest rail distance
-
-Use `ST_DISTANCE(parcel_point, rail_geom)` and calculate the minimum distance per parcel.
-
-#### B. Threshold flags
-
-Add booleans such as:
-
-* within 100 meters
-* within 250 meters
-* within 500 meters
-
-#### C. Optional nearest-feature attribution
-
-If practical, return the nearest rail segment’s attributes too.
+When a residential parcel is within 250m of an active freight rail line AND has a high appeal score,
+the argument is:
+1. The rail line depresses market value (noise, vibration, air quality)
+2. Comparable properties without rail proximity will have sold for higher prices
+3. The assessor may not have adequately discounted for rail proximity
+4. The `assessment_to_sale_ratio` from `parcel_signals` is the strongest evidence
 
 ---
 
-### 6. Final view
+## Notes
 
-Create a final view:
-
-`parcel_rail_enrichment`
-
-Requirements:
-
-* every parcel should appear
-* parcels with no close rail line should still return distance if possible
-* SQL should be readable and production-friendly
-
----
-
-### 7. Suggested SQL
-
-Please generate runnable SQL for:
-
-1. rail line staging table logic if needed
-2. parcel point creation
-3. nearest-rail calculation
-4. final view creation
-
-Avoid pseudocode.
-
----
-
-### 8. Suggested repo structure
-
-Keep it simple:
-
-```text
-project-root/
-  sql/
-    rail_line_tables.sql
-    parcel_rail_view.sql
-  scripts/
-    load_rail_lines.py
-  data_sources/
-    rail_dataset_notes.md
-  docs/
-    architecture.md
-```
-
----
-
-## MVP Definition
-
-This is the MVP:
-
-* load rail line data covering Davidson County
-* store rail geometry in BigQuery
-* create parcel points from lat/long
-* calculate nearest rail distance in meters
-* create boolean proximity flags
-
-That’s all I need for now.
-
----
-
-## Important Notes
-
-* Use **lat/long point proximity**, not parcel polygons, for now
-* Do not overengineer
-* Prefer practical implementation over GIS perfection
-* If the source is nationwide, it is fine to subset to Tennessee or Davidson County before the final view
-* If a county boundary clip is useful, note that as an optional improvement
-
----
-
-## What I want back from Claude Code
-
-Please provide:
-
-1. recommended public rail dataset
-2. step-by-step ingestion approach
-3. Python or CLI scaffolding to prepare/load the data
-4. BigQuery table design
-5. working BigQuery SQL for distance and threshold flags
-6. performance considerations
-7. any source-data gotchas
-
----
-
-## Final Instruction to Claude Code
-
-Act like a pragmatic data engineer helping me stand up a first working version of a rail proximity enrichment pipeline in BigQuery for Davidson County assessor parcels. Prioritize clarity, runnable code, and simple implementation.
-
----
+- ST_Transform to EPSG:3857 converts to meters for accurate distance calculation
+- Davidson County has primarily CSX and Norfolk Southern freight lines
+- The WeGo Music City Star commuter rail runs along the Cumberland River corridor
+- Freight rail runs 24/7; passenger rail only a few times per day (less impact)

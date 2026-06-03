@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
-from app.schemas import InsightHitList, ParcelAnalysis, ParcelRead
-from app.services.parcel_service import get_hit_list, get_parcel, get_parcel_analysis
+from app.schemas import InsightHitList, ParcelAnalysis, ParcelRead, ComprehensiveParcelAnalysis
+from app.services.parcel_service import get_hit_list, get_parcel, get_parcel_analysis, get_comprehensive_parcel_analysis
 
 router = APIRouter(prefix="/parcels", tags=["parcels"])
 
@@ -30,6 +30,15 @@ async def read_parcel(par_id: str, db: AsyncSession = Depends(get_db)):
 @router.get("/{par_id}/analysis", response_model=ParcelAnalysis)
 async def parcel_analysis(par_id: str, db: AsyncSession = Depends(get_db)):
     analysis = await get_parcel_analysis(db, par_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Parcel not found")
+    return analysis
+
+
+@router.get("/{par_id}/comprehensive-analysis", response_model=ComprehensiveParcelAnalysis)
+async def comprehensive_parcel_analysis(par_id: str, db: AsyncSession = Depends(get_db)):
+    """Get comprehensive parcel analysis including all data sources for assessment error detection"""
+    analysis = await get_comprehensive_parcel_analysis(db, par_id)
     if not analysis:
         raise HTTPException(status_code=404, detail="Parcel not found")
     return analysis
