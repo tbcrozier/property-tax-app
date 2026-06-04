@@ -228,3 +228,6 @@ override.tf.json
 
 # Claude
 .claude/
+
+
+/parcels/st_louis/data/features.csv
