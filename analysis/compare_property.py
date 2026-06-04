@@ -24,6 +24,7 @@ from google.cloud import bigquery
 # Configuration defaults
 DEFAULT_YEAR_RANGE = 10
 DEFAULT_SQFT_RANGE_PCT = 25
+DEFAULT_ACRE_RANGE_PCT = 50  # Wider range for acreage since land sizes vary more
 DEFAULT_MIN_COMPARABLES = 5
 DEFAULT_MAX_COMPARABLES = 20
 DEFAULT_SALE_DAYS = 730  # 2 years
@@ -425,7 +426,7 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
 
 def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
                           sale_days: int, max_comps: int,
-                          sqft_range_pct: int,
+                          sqft_range_pct: int, acre_range_pct: int,
                           project: str, dataset: str) -> List[ComparableProperty]:
     """Find comparable properties with recent sales, sorted by distance.
 
@@ -434,6 +435,7 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
     2. Geographic proximity (distance from subject)
     3. Same land use type
     4. Similar square footage (+/- sqft_range_pct)
+    5. Similar acreage (+/- acre_range_pct)
     """
 
     # Calculate sqft range
@@ -443,6 +445,14 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
     else:
         sqft_min = None
         sqft_max = None
+
+    # Calculate acreage range
+    if subject.acres and subject.acres > 0:
+        acre_min = subject.acres * (1 - acre_range_pct / 100)
+        acre_max = subject.acres * (1 + acre_range_pct / 100)
+    else:
+        acre_min = None
+        acre_max = None
 
     query = f"""
     SELECT
@@ -482,6 +492,11 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
             OR b.finished_area IS NULL
             OR (b.finished_area BETWEEN @sqft_min AND @sqft_max)
         )
+        AND (
+            @acre_min IS NULL
+            OR p.Acres IS NULL
+            OR (p.Acres BETWEEN @acre_min AND @acre_max)
+        )
     ORDER BY distance_feet ASC
     LIMIT @max_comps
     """
@@ -496,6 +511,8 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
             bigquery.ScalarQueryParameter("max_comps", "INT64", max_comps),
             bigquery.ScalarQueryParameter("sqft_min", "FLOAT64", sqft_min),
             bigquery.ScalarQueryParameter("sqft_max", "FLOAT64", sqft_max),
+            bigquery.ScalarQueryParameter("acre_min", "FLOAT64", acre_min),
+            bigquery.ScalarQueryParameter("acre_max", "FLOAT64", acre_max),
         ]
     )
 
@@ -880,7 +897,9 @@ def generate_recommendation(subject: SubjectProperty,
             findings.append(f"Property is within 250m of rail line - potential noise impact")
 
     # Sale price comparison - strong evidence if over-assessed vs sale
+    # CRITICAL: If under-assessed vs sale, appeal is risky - assessor can use sale price to RAISE assessment
     sale_ratio = subject.assessment_to_sale_ratio
+    under_assessed_vs_sale = False
     if sale_ratio:
         if sale_ratio > 1.20:  # 20%+ over sale price
             score += 25  # Major boost to appeal score
@@ -894,8 +913,11 @@ def generate_recommendation(subject: SubjectProperty,
             score += 5
             pct_over = (sale_ratio - 1) * 100
             findings.append(f"Assessment is {pct_over:.0f}% above last sale price")
-        elif sale_ratio < 0.95:  # Under-assessed
-            findings.append(f"Assessment is below last sale price - appeal unlikely to succeed")
+        elif sale_ratio < 0.95:  # Under-assessed - THIS IS A DEAL-BREAKER
+            under_assessed_vs_sale = True
+            pct_under = (1 - sale_ratio) * 100
+            findings.insert(0, f"WARNING: Property is UNDER-ASSESSED by {pct_under:.0f}% vs last sale price (${subject.sale_price:,.0f} on {subject.sale_date})")
+            findings.insert(1, f"Appealing could result in assessment INCREASE - assessor can use sale price as evidence")
 
     # MARKET VALUE ANALYSIS - Compare subject to recent comparable sales (PRIMARY METRIC)
     if sale_statistics and sale_statistics.count > 0:
@@ -937,8 +959,16 @@ def generate_recommendation(subject: SubjectProperty,
     if subject_vs_sales is not None and subject_vs_sales < -10:
         recommendation = "LIKELY_FAIR"  # Don't recommend appealing if below market
 
+    # CRITICAL OVERRIDE: If under-assessed vs recent sale price, do NOT recommend appeal
+    # The assessor can use the sale price to RAISE the assessment
+    if under_assessed_vs_sale:
+        recommendation = "NOT_RECOMMENDED"
+        score = 0  # Reset score to reflect the risk
+
     # Add summary finding
-    if recommendation == "LIKELY_FAIR":
+    if recommendation == "NOT_RECOMMENDED":
+        findings.append("Appeal NOT recommended - property is under-assessed relative to recent sale price")
+    elif recommendation == "LIKELY_FAIR":
         findings.append("Assessment appears reasonable relative to market sales")
     elif recommendation == "STRONG_CANDIDATE":
         findings.append("Strong indicators suggest property may be over-assessed vs market")
@@ -1277,9 +1307,9 @@ def analyze_single_property(client: bigquery.Client, subject: SubjectProperty,
     # Calculate statistics
     statistics = calculate_statistics(subject, comparables)
 
-    # Find comparable SALES (COMPER-style, distance-based, recent sales only, similar sqft)
+    # Find comparable SALES (COMPER-style, distance-based, recent sales only, similar sqft and acreage)
     comparable_sales = find_comparable_sales(
-        client, subject, args.sale_days, args.max_comps, args.sqft_range, project, dataset
+        client, subject, args.sale_days, args.max_comps, args.sqft_range, args.acre_range, project, dataset
     )
 
     if len(comparable_sales) < DEFAULT_MIN_COMPARABLES:
@@ -1360,6 +1390,12 @@ def main():
         type=int,
         default=DEFAULT_SQFT_RANGE_PCT,
         help=f"Square footage range +/- percent (default: {DEFAULT_SQFT_RANGE_PCT})"
+    )
+    parser.add_argument(
+        "--acre-range",
+        type=int,
+        default=DEFAULT_ACRE_RANGE_PCT,
+        help=f"Acreage range +/- percent for sales comps (default: {DEFAULT_ACRE_RANGE_PCT})"
     )
     parser.add_argument(
         "--max-comps",
