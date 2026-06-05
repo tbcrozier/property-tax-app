@@ -81,8 +81,15 @@ class ScoredLead:
 def build_scored_leads_query(
     project: str,
     dataset: str,
+    sort_by: str = "estimated_savings"
 ) -> str:
-    """Build the SQL query for finding and scoring appeal leads."""
+    """Build the SQL query for finding and scoring appeal leads.
+    
+    Args:
+        project: GCP project ID
+        dataset: BigQuery dataset
+        sort_by: Column to sort by (estimated_savings, over_assessment, appeal_strength_score, combined_score)
+    """
 
     query = f"""
     WITH enriched_parcels AS (
@@ -185,7 +192,7 @@ def build_scored_leads_query(
       ON cl.ParID = ac.ParID
     LEFT JOIN `{project}.{dataset}.v_assessment_sale_ratio` asr
       ON cl.ParID = asr.ParID
-    ORDER BY cl.estimated_savings DESC
+    ORDER BY cl.{sort_by} DESC
     """
     return query
 
@@ -194,10 +201,11 @@ def fetch_scored_leads(
     client: bigquery.Client,
     project: str,
     dataset: str,
+    sort_by: str = "estimated_savings"
 ) -> List[dict]:
     """Execute the scored leads query and return raw rows."""
 
-    query = build_scored_leads_query(project, dataset)
+    query = build_scored_leads_query(project, dataset, sort_by=sort_by)
     print(f"Executing query against {project}.{dataset}...", file=sys.stderr)
     results = client.query(query).result()
     return [dict(row) for row in results]
@@ -416,6 +424,12 @@ def main():
         help="Filter by confidence level (HIGH, MODERATE, or LOW). If not specified, shows all."
     )
     parser.add_argument(
+        "--sort-by",
+        choices=["over_assessment", "estimated_savings", "appeal_strength_score", "combined_score"],
+        default="estimated_savings",
+        help="Sort results by: over_assessment (largest discrepancy), estimated_savings (default), appeal_strength_score (best appeal case), or combined_score (highest confidence)"
+    )
+    parser.add_argument(
         "--output",
         type=str,
         help="Output file path (default: stdout)"
@@ -439,7 +453,7 @@ def main():
     client = bigquery.Client(project=args.project)
 
     # Fetch raw leads
-    raw_leads = fetch_scored_leads(client, args.project, args.dataset)
+    raw_leads = fetch_scored_leads(client, args.project, args.dataset, sort_by=args.sort_by)
     print(f"Found {len(raw_leads)} raw candidates", file=sys.stderr)
 
     # Build scored leads with filtering
