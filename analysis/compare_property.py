@@ -215,14 +215,8 @@ def lookup_property_by_address(client: bigquery.Client, address: str,
         p.Lat,
         p.Lon,
         p.SalePrice,
-        FORMAT_DATE('%Y-%m-%d', p.OwnDate) as SaleDate,
-        b.year_built,
-        b.finished_area,
-        b.structure_type,
-        b.exterior
+        FORMAT_DATE('%Y-%m-%d', p.OwnDate) as SaleDate
     FROM `{project}.{dataset}.davidson_parcels` p
-    LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
-        ON p.STANPAR = b.apn
     WHERE UPPER(p.PropAddr) LIKE UPPER(@address_pattern)
     LIMIT 10
     """
@@ -240,8 +234,14 @@ def lookup_property_by_address(client: bigquery.Client, address: str,
 def lookup_property_by_parid(client: bigquery.Client, parid: str,
                               project: str, dataset: str) -> List[Dict]:
     """Look up a property by ParID."""
+    # Convert parid to float to match BigQuery type (ParID is stored as FLOAT64)
+    try:
+        parid_float = float(parid)
+    except ValueError:
+        return []
+    
     query = f"""
-    SELECT
+    SELECT DISTINCT
         p.ParID,
         p.STANPAR,
         p.PropAddr,
@@ -268,7 +268,7 @@ def lookup_property_by_parid(client: bigquery.Client, parid: str,
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("parid", "STRING", parid)
+            bigquery.ScalarQueryParameter("parid", "FLOAT64", parid_float)
         ]
     )
 
