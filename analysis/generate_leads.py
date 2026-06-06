@@ -26,7 +26,7 @@ from typing import Optional, List
 from google.cloud import bigquery
 
 # Configuration defaults
-DEFAULT_MIN_SAVINGS = 200
+DEFAULT_MIN_SAVINGS = 1500
 DEFAULT_YEAR_RANGE = 10
 DEFAULT_SQFT_RANGE = 25
 DEFAULT_MIN_COMPARABLES = 5
@@ -57,6 +57,7 @@ class Lead:
     zip_code: str
     cohort_decade: Optional[int]
     cohort_sqft_band: Optional[int]
+    in_flood_zone: bool
 
 
 def build_leads_query(
@@ -87,19 +88,39 @@ def build_leads_query(
         p.SalePrice,
         p.OwnDate,
         b.year_built,
-        b.finished_area
+        b.finished_area,
+        COALESCE(fz.in_flood_zone, FALSE) AS in_flood_zone
       FROM `{project}.{dataset}.davidson_parcels` p
       LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b ON p.STANPAR = b.apn
+      LEFT JOIN `{project}.{dataset}.v_parcel_floodzone_enrichment` fz ON p.ParID = fz.parcel_id
       WHERE p.TotlAppr > 0
         AND p.LUDesc = 'SINGLE FAMILY'
         -- Exclude recent sales (last N days)
         AND (p.OwnDate IS NULL OR p.OwnDate < DATE_SUB(CURRENT_DATE(), INTERVAL {exclude_recent_sales_days} DAY))
         -- Exclude under-assessed properties (appeal could backfire - assessor can use sale price to RAISE assessment)
-        -- Only applies to valid sales >= $10k (filters out nominal transfers)
-        AND (p.SalePrice IS NULL OR p.SalePrice < 10000 OR p.TotlAppr >= p.SalePrice * 0.95)
+        -- Only consider sales within the relevant market window (2020-01-01 to 2025-01-01):
+        --   - Sales before 2020: too old, market has changed significantly
+        --   - Sales after Jan 1, 2025: after the reappraisal valuation date, not relevant to 2025 assessments
+        --   - Only applies to valid sales >= $10k (filters out nominal transfers)
+        AND (p.SalePrice IS NULL OR p.SalePrice < 10000 OR p.OwnDate < '2020-01-01' OR p.OwnDate >= '2025-01-01' OR p.TotlAppr >= p.SalePrice * 0.95)
     ),
     cohort_assignments AS (
-      SELECT *,
+      SELECT
+        ParID,
+        PropAddr,
+        PropZip,
+        LUDesc,
+        TotlAppr,
+        Owner,
+        OwnAddr1,
+        OwnCity,
+        OwnState,
+        OwnZip,
+        SalePrice,
+        OwnDate,
+        year_built,
+        finished_area,
+        in_flood_zone,
         -- Create cohort keys for grouping comparable properties
         PropZip AS cohort_zip,
         LUDesc AS cohort_lu,
@@ -134,6 +155,7 @@ def build_leads_query(
         c.OwnZip,
         c.year_built,
         c.finished_area,
+        c.in_flood_zone,
         c.cohort_decade,
         c.cohort_sqft_band,
         s.median_assessment,
@@ -209,6 +231,7 @@ def fetch_leads(
             zip_code=row.PropZip or "",
             cohort_decade=int(row.cohort_decade) if row.cohort_decade else None,
             cohort_sqft_band=int(row.cohort_sqft_band) if row.cohort_sqft_band else None,
+            in_flood_zone=bool(row.in_flood_zone),
         )
         leads.append(lead)
 
@@ -224,7 +247,8 @@ def format_csv(leads: List[Lead]) -> str:
     fieldnames = [
         "parid", "address", "owner_name", "owner_address",
         "current_assessment", "median_comparable", "over_assessment",
-        "estimated_savings", "num_comparables", "year_built", "sqft", "land_use"
+        "estimated_savings", "num_comparables", "year_built", "sqft", "land_use",
+        "in_flood_zone"
     ]
 
     # Create CSV in memory
@@ -247,6 +271,7 @@ def format_csv(leads: List[Lead]) -> str:
             "year_built": lead.year_built if lead.year_built else "",
             "sqft": f"{lead.sqft:.0f}" if lead.sqft else "",
             "land_use": lead.land_use,
+            "in_flood_zone": "Yes" if lead.in_flood_zone else "No",
         }
         writer.writerow(row)
 
