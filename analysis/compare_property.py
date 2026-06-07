@@ -202,7 +202,7 @@ def lookup_property_by_address(client: bigquery.Client, address: str,
                                 project: str, dataset: str) -> List[Dict]:
     """Look up properties matching an address pattern."""
     query = f"""
-    SELECT
+    SELECT DISTINCT
         p.ParID,
         p.STANPAR,
         p.PropAddr,
@@ -215,8 +215,14 @@ def lookup_property_by_address(client: bigquery.Client, address: str,
         p.Lat,
         p.Lon,
         p.SalePrice,
-        FORMAT_DATE('%Y-%m-%d', p.OwnDate) as SaleDate
+        FORMAT_DATE('%Y-%m-%d', p.OwnDate) as SaleDate,
+        b.year_built,
+        b.finished_area,
+        b.structure_type,
+        b.exterior
     FROM `{project}.{dataset}.davidson_parcels` p
+    LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
+        ON p.STANPAR = b.apn
     WHERE UPPER(p.PropAddr) LIKE UPPER(@address_pattern)
     LIMIT 10
     """
