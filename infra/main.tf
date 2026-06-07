@@ -882,3 +882,26 @@ resource "google_bigquery_table" "view_condo_comparison" {
 
   depends_on = [google_bigquery_table.davidson_parcels]
 }
+
+# BigQuery Table - Scraped Bed/Bath Data
+# Populated by analysis/scraper.py from portal.padctn.org
+resource "google_bigquery_table" "davidson_bed_bath" {
+  dataset_id          = google_bigquery_dataset.property_tax.dataset_id
+  table_id            = "davidson_bed_bath"
+  description         = "Beds, baths, sqft, and year built scraped from Davidson County Assessor portal"
+  deletion_protection = false
+
+  schema = jsonencode([
+    { name = "parcel_id",      type = "STRING",    mode = "NULLABLE", description = "Parcel ID from source table" },
+    { name = "address",        type = "STRING",    mode = "NULLABLE", description = "Full property address" },
+    { name = "internal_id",    type = "STRING",    mode = "NULLABLE", description = "Portal internal property ID" },
+    { name = "beds",           type = "INTEGER",   mode = "NULLABLE", description = "Number of bedrooms" },
+    { name = "baths",          type = "INTEGER",   mode = "NULLABLE", description = "Number of full bathrooms" },
+    { name = "half_baths",     type = "INTEGER",   mode = "NULLABLE", description = "Number of half bathrooms" },
+    { name = "year_built",     type = "INTEGER",   mode = "NULLABLE", description = "Year structure was built" },
+    { name = "square_footage", type = "INTEGER",   mode = "NULLABLE", description = "Finished square footage" },
+    { name = "property_type",  type = "STRING",    mode = "NULLABLE", description = "Property type (e.g. SINGLE FAM)" },
+    { name = "error",          type = "STRING",    mode = "NULLABLE", description = "Error message if scrape failed" },
+    { name = "scraped_at",     type = "TIMESTAMP", mode = "NULLABLE", description = "When this row was scraped" }
+  ])
+}
