@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from google.cloud import bigquery
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -49,7 +49,7 @@ SUMMARY_URL = PORTAL_BASE + "/OFS/WP/Summary/{internal_id}/1/false"
 
 CONCURRENCY = 2       # parallel workers; increase if the server handles it
 BATCH_SIZE = 500      # rows written to BigQuery at a time
-RATE_LIMIT_DELAY = 4  # seconds between requests per worker
+RATE_LIMIT_DELAY = 2  # seconds between requests per worker
 
 # ---------------------------------------------------------------------------
 # Static DevExpress fields — same on every request (from DevTools Payload tab)
@@ -144,6 +144,14 @@ async def establish_session(client: httpx.AsyncClient) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Step 1: Search → internal property ID
 # ---------------------------------------------------------------------------
+def _clean_house_number(house: str) -> str:
+    """Strip float suffix from BQ-sourced house numbers (e.g. '3051.0' → '3051')."""
+    try:
+        return str(int(float(house)))
+    except (ValueError, TypeError):
+        return house.strip()
+
+
 def _build_search_payload(house_number: str, street_name: str) -> dict:
     """
     Build the POST body for QuickPropertySearchAsync.
@@ -154,9 +162,9 @@ def _build_search_payload(house_number: str, street_name: str) -> dict:
     return {
         "RealEstate": "true",
         "SelectedSearch": "2",
-        "StreetNumber": house_number.strip(),
+        "StreetNumber": _clean_house_number(house_number),
         "AlterCriteria": "False",
-        "SingleSearchCriteria": street_name.strip() + " ",
+        "SingleSearchCriteria": " ".join(street_name.split()) + " ",
         "DXScript": _DXSCRIPT,
         "DXCss": _DXCSS,
     }
@@ -185,11 +193,17 @@ async def quick_search(
 ) -> str | None:
     """POST search, return internal property ID or None if not found."""
     payload = _build_search_payload(house_number, street_name)
-    search_str = f"{house_number} {street_name}"
-    params = {"Length": len(search_str.strip()) + 1}  # +1 for trailing space on street name
+    clean_house = _clean_house_number(house_number)
+    clean_street = " ".join(street_name.split())
+    search_str = f"{clean_house} {clean_street}"
+    params = {"Length": len(search_str) + 1}  # +1 for trailing space on street name
+    log.debug("Searching: house=%r street=%r", clean_house, clean_street)
     resp = await client.post(SEARCH_URL, data=payload, params=params, headers=headers)
     resp.raise_for_status()
-    return _parse_internal_id(resp.text)
+    internal_id = _parse_internal_id(resp.text)
+    if not internal_id:
+        log.warning("No result for house=%r street=%r — response snippet: %s", clean_house, clean_street, resp.text[:300])
+    return internal_id
 
 
 # ---------------------------------------------------------------------------
@@ -215,19 +229,11 @@ async def select_account(
 def _parse_int(text: str | None) -> int | None:
     if not text:
         return None
-    m = re.search(r"\d+", text.strip())
-    return int(m.group()) if m else None
+    m = re.search(r"[\d,]+", text.strip())
+    return int(m.group().replace(",", "")) if m else None
 
 
 def parse_summary_html(html: str) -> dict:
-    """
-    Extract property attributes from /OFS/WP/Summary HTML.
-
-    The portal renders fields as:
-        <li><label class="font-weight-bold" for="Number_of_Beds:">Number of Beds:</label> 2</li>
-
-    Value is the NavigableString immediately after the closing </label> tag.
-    """
     soup = BeautifulSoup(html, "lxml")
     fields: dict = {}
 
@@ -240,15 +246,39 @@ def parse_summary_html(html: str) -> dict:
         "Property Type":        "property_type",
     }
 
-    for label_tag in soup.find_all("label", class_="font-weight-bold"):
+    all_labels = []
+    for label_tag in soup.find_all("label"):
         key = label_tag.get_text(strip=True).rstrip(":")
-        if key in label_map:
-            value_node = label_tag.next_sibling
-            value = str(value_node).strip() if value_node else None
+        all_labels.append(key)
+        if key not in label_map:
+            continue
+
+        # Strategy 1: value is a NavigableString immediately after the label
+        value = None
+        sibling = label_tag.next_sibling
+        if isinstance(sibling, NavigableString):
+            value = str(sibling).strip()
+
+        # Strategy 2: value is in the next sibling tag (e.g. <span> or <td>)
+        if not value:
+            next_tag = label_tag.find_next_sibling()
+            if next_tag:
+                value = next_tag.get_text(strip=True)
+
+        # Strategy 3: strip label text from parent container
+        if not value and label_tag.parent:
+            parent_text = label_tag.parent.get_text(" ", strip=True)
+            label_text = label_tag.get_text(strip=True)
+            value = parent_text.replace(label_text, "", 1).strip().lstrip(":").strip()
+
+        if value:
             fields[label_map[key]] = value
 
     if not fields:
-        log.warning("parse_summary_html: no fields matched. HTML snippet:\n%s", html[:400])
+        log.warning("parse_summary_html: no fields matched. Labels on page: %s", all_labels)
+        log.warning("HTML snippet:\n%s", html[:800])
+    else:
+        log.info("parse_summary_html matched: %s", fields)
 
     return fields
 
@@ -257,10 +287,15 @@ async def fetch_summary(
     client: httpx.AsyncClient,
     internal_id: str,
     headers: dict,
+    debug_html: bool = False,
 ) -> dict:
     get_headers = {**headers, "Accept": "text/html, */*; q=0.01"}
     resp = await client.get(SUMMARY_URL.format(internal_id=internal_id), headers=get_headers)
     resp.raise_for_status()
+    if debug_html:
+        print("\n--- RAW SUMMARY HTML (first 3000 chars) ---")
+        print(resp.text[:3000])
+        print("-------------------------------------------\n")
     return parse_summary_html(resp.text)
 
 
@@ -271,6 +306,7 @@ async def scrape_parcel(
     client: httpx.AsyncClient,
     parcel: dict,
     headers: dict,
+    debug_html: bool = False,
 ) -> PropertyResult:
     result = PropertyResult(parcel_id=parcel["parcel_id"], address=parcel["address"])
     try:
@@ -283,7 +319,7 @@ async def scrape_parcel(
 
         result.internal_id = internal_id
         await select_account(client, internal_id, headers)
-        details = await fetch_summary(client, internal_id, headers)
+        details = await fetch_summary(client, internal_id, headers, debug_html=debug_html)
 
         result.beds = _parse_int(details.get("beds"))
         result.baths = _parse_int(details.get("baths"))
@@ -303,12 +339,31 @@ async def scrape_parcel(
 # ---------------------------------------------------------------------------
 # BigQuery
 # ---------------------------------------------------------------------------
-def load_parcels_from_bq(client: bigquery.Client, limit: int | None = None) -> list[dict]:
+def load_parcels_from_bq(
+    client: bigquery.Client,
+    limit: int | None = None,
+    skip_existing: bool = True,
+    single_family_only: bool = True,
+) -> list[dict]:
     """
-    Read parcels from davidson_parcels. We pull PropHouse and PropStreet
-    separately so we never have to split the address string ourselves.
+    Read parcels from davidson_parcels, skipping any already in davidson_bed_bath.
+
+    skip_existing=True makes the run resumable — if it crashes at parcel 150K
+    you can restart and it picks up where it left off without duplicates.
+    Set skip_existing=False to force a full re-scrape.
+
+    single_family_only=True (default) restricts to LUDesc = 'SINGLE FAMILY'.
     """
     limit_clause = f"LIMIT {limit}" if limit else ""
+    skip_clause = f"""
+        AND ParID NOT IN (
+            SELECT parcel_id
+            FROM `{BQ_PROJECT}.{BQ_DEST_TABLE}`
+            WHERE error IS NULL
+        )
+    """ if skip_existing else ""
+    sfh_clause = "AND LUDesc = 'SINGLE FAMILY'" if single_family_only else ""
+
     query = f"""
         SELECT
             ParID       AS parcel_id,
@@ -317,11 +372,13 @@ def load_parcels_from_bq(client: bigquery.Client, limit: int | None = None) -> l
             PropStreet  AS street_name
         FROM `{BQ_PROJECT}.{BQ_SOURCE_TABLE}`
         WHERE PropHouse IS NOT NULL AND PropStreet IS NOT NULL
+        {sfh_clause}
+        {skip_clause}
         {limit_clause}
     """
-    log.info("Loading parcels from BigQuery...")
+    log.info("Loading parcels from BigQuery (skip_existing=%s)...", skip_existing)
     rows = list(client.query(query).result())
-    log.info("Loaded %d parcels", len(rows))
+    log.info("Loaded %d parcels to scrape", len(rows))
     return [dict(r) for r in rows]
 
 
@@ -358,11 +415,11 @@ async def worker(
     worker_id: int,
     queue: asyncio.Queue,
     results: list[PropertyResult],
-    session_id: str,
-    csrf_token: str,
 ) -> None:
-    headers = _base_headers(session_id, csrf_token)
     async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        session_id, csrf_token = await establish_session(client)
+        headers = _base_headers(session_id, csrf_token)
+        log.info("[w%d] session established", worker_id)
         while True:
             parcel = await queue.get()
             if parcel is None:
@@ -377,7 +434,7 @@ async def worker(
 # ---------------------------------------------------------------------------
 # Manual smoke test — no BigQuery needed
 # ---------------------------------------------------------------------------
-async def test_one(house_number: str = "1236", street_name: str = "LAKEWALK") -> None:
+async def test_one(house_number: str = "1810", street_name: str = "EASTLAND AVE", debug_html: bool = True) -> None:
     """
     Test a single address without touching BigQuery.
     Run: python analysis/scraper.py
@@ -387,23 +444,20 @@ async def test_one(house_number: str = "1236", street_name: str = "LAKEWALK") ->
         headers = _base_headers(session_id, csrf_token)
         parcel = {
             "parcel_id":   "TEST",
-            "address":     f"{house_number} {street_name} RD NASHVILLE",
+            "address":     f"{house_number} {street_name} NASHVILLE",
             "house_number": house_number,
             "street_name":  street_name,
         }
-        result = await scrape_parcel(client, parcel, headers)
+        result = await scrape_parcel(client, parcel, headers, debug_html=debug_html)
         print(result)
 
 
 # ---------------------------------------------------------------------------
 # Full BigQuery run
 # ---------------------------------------------------------------------------
-async def run_scraper(limit: int | None = None) -> None:
+async def run_scraper(limit: int | None = None, single_family_only: bool = True) -> None:
     bq_client = bigquery.Client(project=BQ_PROJECT)
-    parcels = load_parcels_from_bq(bq_client, limit=limit)
-
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as init_client:
-        session_id, csrf_token = await establish_session(init_client)
+    parcels = load_parcels_from_bq(bq_client, limit=limit, single_family_only=single_family_only)
 
     queue: asyncio.Queue = asyncio.Queue()
     for p in parcels:
@@ -413,7 +467,7 @@ async def run_scraper(limit: int | None = None) -> None:
 
     results: list[PropertyResult] = []
     await asyncio.gather(*[
-        asyncio.create_task(worker(i, queue, results, session_id, csrf_token))
+        asyncio.create_task(worker(i, queue, results))
         for i in range(CONCURRENCY)
     ])
 
@@ -429,7 +483,8 @@ async def run_scraper(limit: int | None = None) -> None:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     # --- Smoke test (no BigQuery) ---
-    asyncio.run(test_one("1236", "LAKEWALK"))
+    # asyncio.run(test_one("3051", "UNION HILL RD"))
+    asyncio.run(run_scraper(limit=100))
 
     # --- Small batch from BigQuery (uncomment to use) ---
     # asyncio.run(run_scraper(limit=5))
