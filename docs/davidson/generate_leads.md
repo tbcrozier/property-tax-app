@@ -30,6 +30,7 @@ The following BigQuery tables must be available:
 |-------|-------------|
 | `public-data-dev.property_tax.davidson_parcels` | Davidson County parcel data with assessments |
 | `public-data-dev.property_tax.davidson_building_characteristics` | Building details (year built, sqft) |
+| `public-data-dev.property_tax.v_parcel_floodzone_enrichment` | FEMA flood zone data |
 
 ---
 
@@ -43,9 +44,15 @@ The following BigQuery tables must be available:
 - **Exclude**: Properties sold within last 2 years (730 days)
 - **Rationale**: Recent sales likely have accurate market-based assessments
 
+### Sale Validation Filter
+- **Exclude**: Properties where a valid recent sale validates the assessment
+- **Valid sale**: Sale price >= $10,000, sale date between 2020-01-01 and 2025-01-01
+- **Validation rule**: If assessment is within 110% of sale price, exclude the property
+- **Rationale**: If someone paid $500k and the property is assessed at $480k, the sale proves the assessment is reasonable. Only properties assessed >110% of a valid sale are potential leads.
+
 ### Minimum Savings Threshold
-- **Default**: $200 first-year tax savings
-- **Rationale**: Must cover customer acquisition cost
+- **Default**: $1,500 first-year tax savings
+- **Rationale**: Must provide meaningful value to justify appeal effort
 
 ---
 
@@ -58,8 +65,8 @@ Where:
 - 25% = Tennessee residential assessment ratio
 - 3.254% = Davidson County tax rate (per $100 of assessed value)
 
-Minimum Lead Threshold: Savings ≥ $200
-Required Over-Assessment: ≥ $24,585 (~$25,000)
+Minimum Lead Threshold: Savings ≥ $1,500
+Required Over-Assessment: ≥ ~$185,000
 ```
 
 ### Example Calculation
@@ -74,20 +81,56 @@ Required Over-Assessment: ≥ $24,585 (~$25,000)
 
 ---
 
-## Comparable Cohort Definition
+## Comparable Selection Methodology
 
-Properties are grouped into cohorts based on:
+The lead generator uses a **percentage-based, distance-weighted comparable selection** approach (similar to `compare_property.py`).
 
-| Dimension | Grouping Logic |
-|-----------|----------------|
-| Location | Same zip code |
-| Land Use | Same LUDesc (SINGLE FAMILY) |
-| Age | Same decade (e.g., 1980-1989) |
-| Size | Same 500 sqft band (e.g., 1500-1999) |
+### Comparable Criteria
 
-### Cohort Size Requirement
-- Minimum 5 properties per cohort
-- Cohorts with fewer properties are excluded (unreliable median)
+Each subject property finds its own custom comparable set based on:
+
+| Dimension | Matching Logic | Default |
+|-----------|----------------|---------|
+| **Distance** | Within X miles of subject (geographic) | 3 miles |
+| **Square Footage** | Within ±X% of subject sqft | ±25% |
+| **Year Built** | Within ±X years of subject | ±10 years |
+| **Acreage** | Within ±X% of subject acreage | ±15% |
+| **Land Use** | Same LUDesc (SINGLE FAMILY) | Required |
+
+### Similarity Scoring
+
+Each comparable is assigned a similarity score (lower = more similar):
+
+| Factor | Weight | Calculation |
+|--------|--------|-------------|
+| Square Footage | 35% | `|subject_sqft - comp_sqft| / subject_sqft` |
+| Year Built | 25% | `|subject_year - comp_year| / year_range` |
+| Acreage | 20% | `|subject_acres - comp_acres| / subject_acres` |
+| Distance | 20% | `distance_meters / max_distance_meters` |
+
+### Quality-Based Selection
+
+1. All properties meeting the criteria are ranked by similarity score
+2. Top 20 most similar comparables are selected
+3. Median assessment is calculated from these top comps
+4. Properties with NULL/zero acreage skip the acreage filter (treated as "any acreage")
+
+### Confidence Scoring
+
+Each lead receives a confidence score (0-100) based on:
+
+| Comp Count | Base Score |
+|------------|------------|
+| 1-2 comps | 10-20 (very low confidence) |
+| 3-4 comps | 30-50 (low confidence) |
+| 5-9 comps | 50-70 (moderate confidence) |
+| 10+ comps | 70 (good base) |
+
+**Similarity bonus** (0-30 points):
+- Excellent similarity (avg < 0.15): +30
+- Good similarity (avg < 0.25): +20
+- Moderate similarity (avg < 0.40): +10
+- Poor similarity: +0
 
 ---
 
@@ -100,13 +143,17 @@ Properties are grouped into cohorts based on:
 | `owner_name` | STRING | Owner name |
 | `owner_address` | STRING | Mailing address (for outreach) |
 | `current_assessment` | FLOAT | Current TotlAppr |
-| `median_comparable` | FLOAT | Median assessment of cohort |
+| `median_comparable` | FLOAT | Median assessment of top 20 comps |
 | `over_assessment` | FLOAT | Current - Median |
 | `estimated_savings` | FLOAT | First-year tax savings |
-| `num_comparables` | INT | Size of comparable cohort |
+| `num_comparables` | INT | Number of comps used (max 20) |
+| `confidence_score` | FLOAT | Quality score 0-100 |
 | `year_built` | INT | Year property was built |
 | `sqft` | FLOAT | Finished square footage |
+| `acreage` | FLOAT | Property acreage |
 | `land_use` | STRING | Land use description |
+| `avg_similarity` | FLOAT | Average similarity score of comps |
+| `avg_comp_distance_miles` | FLOAT | Average distance to comps |
 | `in_flood_zone` | STRING | "Yes" or "No" - FEMA flood zone status |
 
 ---
@@ -118,7 +165,10 @@ Properties are grouped into cohorts based on:
 ```bash
 cd /path/to/property-tax-app
 
-# Generate leads with default $200 minimum savings
+# Test on a single zip code first (fast, cheap)
+python analysis/generate_leads.py --zipcode 37205 --limit 50 --output test_leads.csv
+
+# Generate leads with default settings
 python analysis/generate_leads.py --output leads.csv
 
 # Preview the SQL query without executing
@@ -133,6 +183,15 @@ python analysis/generate_leads.py --show-query
 python analysis/generate_leads.py \
   --min-savings 500 \
   --output premium_leads.csv
+```
+
+#### Test on Single Zip Code (Cost-Controlled)
+
+```bash
+python analysis/generate_leads.py \
+  --zipcode 37205 \
+  --limit 50 \
+  --output test_leads.csv
 ```
 
 #### Generate Limited Sample for Testing
@@ -151,12 +210,14 @@ python analysis/generate_leads.py \
   --output leads.json
 ```
 
-#### Adjust Comparable Criteria
+#### Custom Comparable Criteria
 
 ```bash
 python analysis/generate_leads.py \
-  --min-comparables 10 \
-  --exclude-recent-sales 365 \
+  --sqft-range 20 \
+  --year-range 15 \
+  --acreage-range 10 \
+  --max-distance 2.0 \
   --output conservative_leads.csv
 ```
 
@@ -164,11 +225,14 @@ python analysis/generate_leads.py \
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--min-savings` | 200 | Minimum first-year tax savings to qualify |
-| `--year-range` | 10 | Year built range for cohort grouping |
-| `--sqft-range` | 25 | Square footage % range for cohorts |
-| `--min-comparables` | 5 | Minimum cohort size for reliable median |
+| `--min-savings` | 1500 | Minimum first-year tax savings to qualify |
+| `--year-range` | 10 | Year built range (+/- years) for comparables |
+| `--sqft-range` | 25 | Square footage % range (+/-) for comparables |
+| `--acreage-range` | 15 | Acreage % range (+/-) for comparables |
+| `--max-distance` | 3.0 | Maximum distance in miles for comparables |
+| `--min-comparables` | 3 | Minimum comps required for inclusion |
 | `--exclude-recent-sales` | 730 | Exclude sales within N days |
+| `--zipcode` | (none) | Restrict to single zip code (for testing) |
 | `--output` | stdout | Output file path |
 | `--format` | csv | Output format (csv or json) |
 | `--limit` | unlimited | Maximum leads to return |
@@ -186,6 +250,8 @@ Use `compare_property.py` to verify a lead's assessment vs comparables:
 
 ```bash
 python analysis/compare_property.py --parid "181782.0"
+# or
+python analysis/compare_property.py --address "123 MAIN ST"
 ```
 
 ### 2. Verify Savings Calculation
@@ -200,9 +266,19 @@ Over-assessment: $500,000 - $450,000 = $50,000
 Savings: $50,000 × 0.25 × 0.03254 = $406.75
 ```
 
-### 3. Check Cohort Reasonableness
+### 3. Check Confidence Scores
 
-Review that the `num_comparables` count is reasonable (5-100 properties). Very large cohorts may indicate overly broad grouping.
+Review the `confidence_score` column:
+- **70-100**: High confidence - solid comparable basis
+- **50-70**: Moderate confidence - reasonable estimate
+- **30-50**: Low confidence - use with caution
+- **0-30**: Very low confidence - may not be reliable
+
+### 4. Validate Comp Quality
+
+Check `avg_similarity` and `avg_comp_distance_miles`:
+- Lower similarity scores (< 0.25) indicate better matches
+- Closer average distance indicates tighter geographic clustering
 
 ---
 
@@ -212,27 +288,29 @@ Review that the `num_comparables` count is reasonable (5-100 properties). Very l
 
 1. **Misclassified Properties**: Some non-residential properties may be coded as SINGLE FAMILY (e.g., public housing, institutional properties)
 
-2. **Duplicate Leads**: A property may appear multiple times if it falls into different cohorts based on building characteristics data
+2. **Missing Building Data**: Properties without year_built or finished_area are excluded
 
-3. **Missing Building Data**: Properties without year_built or finished_area are excluded
+3. **Missing Location Data**: Properties without Lat/Lon coordinates are excluded
 
 ### Methodology Limitations
 
-1. **Cohort Boundaries**: Using fixed bands (decades, 500 sqft) may split similar properties into different cohorts
+1. **Self-Join Performance**: The distance-based comparable search uses a self-join which is more expensive than fixed cohorts. Full county runs may take several minutes.
 
-2. **No Location Quality**: Properties in the same zip code may be in very different neighborhoods
+2. **No Location Quality**: Properties in the same distance radius may be in very different neighborhoods or across major boundaries (highways, rivers).
 
-3. **Assessment Timing**: Data reflects point-in-time assessments; may not reflect recent appeals or corrections
+3. **Assessment Timing**: Data reflects point-in-time assessments; may not reflect recent appeals or corrections.
 
 ---
 
 ## BigQuery Cost Estimation
 
-The query scans approximately:
-- `davidson_parcels`: ~180,000 rows
-- `davidson_building_characteristics`: ~150,000 rows
+The query performs a self-join on ~180,000 parcels with geographic distance calculations.
 
-Estimated cost per run: < $0.10 (depends on current BigQuery pricing)
+**Estimated cost per run:**
+- Single zip code: < $0.05
+- Full county: $0.10 - $0.50 (depends on result set size)
+
+**Tip:** Use `--zipcode` for development/testing to minimize costs.
 
 ---
 
@@ -241,8 +319,9 @@ Estimated cost per run: < $0.10 (depends on current BigQuery pricing)
 ### "No leads found"
 
 1. Check `--min-savings` threshold - try lowering it
-2. Verify BigQuery connectivity: `bq ls public-data-dev:property_tax`
-3. Check if tables exist and have data
+2. Check `--min-comparables` - try lowering to 2 or 3
+3. Verify BigQuery connectivity: `bq ls public-data-dev:property_tax`
+4. Check if tables exist and have data
 
 ### "Permission denied"
 
@@ -250,41 +329,26 @@ Estimated cost per run: < $0.10 (depends on current BigQuery pricing)
 2. Verify access to `public-data-dev` project
 3. Run `gcloud auth application-default login`
 
-### Duplicate ParIDs in output
+### Query takes too long
 
-This is expected behavior - a property may match multiple cohorts. Filter duplicates in post-processing if needed:
-
-```bash
-# Keep only highest savings per parcel
-sort -t',' -k8 -rn leads.csv | awk -F',' '!seen[$1]++' > deduped_leads.csv
-```
+1. Use `--zipcode` to restrict to a single zip code
+2. Use `--limit` to cap results
+3. Consider reducing `--max-distance` to narrow the comparable search radius
 
 ---
 
-## Ideas for Improvement
+## Comparison with compare_property.py
 
-### Cohort Refinement
+Both scripts use similar methodology for finding comparables:
 
-- **Lot size as cohort dimension**: Add parcel acreage or lot square footage as a comparison criteria. This would limit outliers where land value is significantly higher than peers due to larger lots. Currently, a 0.25 acre lot and a 2 acre lot in the same zip/decade/sqft band are compared equally, which can skew the median unfairly.
+| Feature | generate_leads.py | compare_property.py |
+|---------|-------------------|---------------------|
+| **Purpose** | Batch lead generation | Single property analysis |
+| **Comp Selection** | Percentage-based + distance | Percentage-based + zip code |
+| **Geographic Filter** | Distance (miles) | Zip code |
+| **Similarity Scoring** | Yes (weighted) | Yes (weighted) |
+| **Top N Comps** | 20 | Configurable |
+| **Sales Analysis** | No | Yes (COMPER-style) |
+| **Confidence Score** | Yes | No (uses recommendation) |
 
-- **Geographic clustering**: Use neighborhood-level grouping instead of zip code. Properties in the same zip can be in vastly different micro-markets.
-
-### Data Quality Filters
-
-- **Institutional/exempt property filter**: Exclude properties owned by housing authorities (MDHA), churches, government entities by owner name patterns. These are often misclassified as SINGLE FAMILY.
-
-- **Maximum appraisal cap**: Filter out properties above a threshold (e.g., $3M) to avoid ultra-high-value homes where comps are harder to defend.
-
-### Appeal Success Indicators
-
-- **Property condition signals**: Incorporate building permit data to identify homes with/without recent renovations.
-
-- **Appeal success probability score**: Historical appeal outcomes by cohort to estimate win likelihood.
-
-- **Flood zone leverage**: Properties in flood zones may have stronger arguments for land value reduction.
-
-### Expanded Scope
-
-- **Support additional land use types**: Condos, duplexes, townhomes.
-
-- **Multi-county support**: Extend to Shelby (Memphis), Knox (Knoxville), etc.
+Use `compare_property.py` to validate individual leads from `generate_leads.py`.

@@ -5,6 +5,10 @@ Comparative analysis tool for property tax assessments. Goal: identify parcels t
 
 ## Project Structure
 ```
+analysis/             # Property analysis and lead generation tools
+  generate_leads.py   # Batch lead generator for over-assessed properties
+  compare_property.py # Single property analysis with appeal recommendation
+
 infra/                # Terraform infrastructure
   main.tf             # BigQuery dataset, table, and views
   variables.tf        # Variable definitions
@@ -32,6 +36,10 @@ ratio_corrector/      # Residential/Commercial classification detector
   queries/
     top_candidates.sql  # Top 100 candidates for manual review
     summary.sql         # Summary statistics by LU code, zoning, score band
+
+docs/                 # Documentation
+  davidson/
+    generate_leads.md   # Lead generator documentation
 ```
 
 ## Data Sources
@@ -213,6 +221,59 @@ Table public-data-dev:property_tax.davidson_parcels
 
 
 
+
+## Analysis Tools
+
+The `analysis/` folder contains Python scripts for property analysis and lead generation:
+
+### generate_leads.py
+Batch lead generator that identifies over-assessed single family properties across Davidson County.
+
+**Key features:**
+- Percentage-based comparable criteria (±25% sqft, ±10 years, ±15% acreage)
+- Distance-based filtering (default 3 miles) instead of zip code
+- Similarity-weighted ranking (top 20 most similar comps)
+- Confidence scoring (0-100) based on comp quality
+- Sale validation filter (excludes properties where recent sale validates assessment)
+
+```bash
+# Test on single zip code (cost-controlled)
+python analysis/generate_leads.py --zipcode 37205 --limit 50 --output test.csv
+
+# Full county run
+python analysis/generate_leads.py --output leads.csv
+
+# Preview SQL without executing
+python analysis/generate_leads.py --show-query
+```
+
+### compare_property.py
+Single property analysis tool for detailed assessment comparison.
+
+**Key features:**
+- Assessment-based comparables (same zip, similar characteristics)
+- Market value analysis (recent sales within distance, COMPER-style)
+- Environmental factors (flood zone, rail proximity)
+- Building permit history
+- Appeal recommendation with strength score
+
+```bash
+# Analyze by address
+python analysis/compare_property.py --address "123 MAIN ST"
+
+# Analyze by parcel ID
+python analysis/compare_property.py --parid "181782.0"
+
+# Batch analysis from file
+python analysis/compare_property.py --input-file addresses.txt --output report.txt
+```
+
+**Validation workflow:**
+1. Run `generate_leads.py` to generate leads
+2. Spot-check individual leads with `compare_property.py`
+3. Verify the recommendation aligns with lead confidence
+
+---
 
 ## Appeal Analytics
 
