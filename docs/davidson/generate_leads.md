@@ -95,7 +95,11 @@ Each subject property finds its own custom comparable set based on:
 | **Square Footage** | Within ±X% of subject sqft | ±25% |
 | **Year Built** | Within ±X years of subject | ±10 years |
 | **Acreage** | Within ±X% of subject acreage | ±15% |
+| **Bedrooms** | Within ±X beds of subject | Exact match (0) |
+| **Bathrooms** | Within ±X baths of subject | Exact match (0) |
 | **Land Use** | Same LUDesc (SINGLE FAMILY) | Required |
+
+**Note:** Bed/bath data comes from the `davidson_bed_bath` table (scraped from padctn.org). Half baths count as 0.5 baths. Properties without bed/bath data skip those filters but receive a confidence penalty.
 
 ### Similarity Scoring
 
@@ -103,10 +107,12 @@ Each comparable is assigned a similarity score (lower = more similar):
 
 | Factor | Weight | Calculation |
 |--------|--------|-------------|
-| Square Footage | 35% | `|subject_sqft - comp_sqft| / subject_sqft` |
-| Year Built | 25% | `|subject_year - comp_year| / year_range` |
-| Acreage | 20% | `|subject_acres - comp_acres| / subject_acres` |
+| Square Footage | 25% | `|subject_sqft - comp_sqft| / subject_sqft` |
+| Year Built | 20% | `|subject_year - comp_year| / year_range` |
+| Acreage | 15% | `|subject_acres - comp_acres| / subject_acres` |
 | Distance | 20% | `distance_meters / max_distance_meters` |
+| Bedrooms | 10% | `|subject_beds - comp_beds| / subject_beds` |
+| Bathrooms | 10% | `|subject_baths - comp_baths| / subject_baths` |
 
 ### Quality-Based Selection
 
@@ -114,6 +120,7 @@ Each comparable is assigned a similarity score (lower = more similar):
 2. Top 20 most similar comparables are selected
 3. Median assessment is calculated from these top comps
 4. Properties with NULL/zero acreage skip the acreage filter (treated as "any acreage")
+5. Properties without bed/bath data skip those filters but receive a -10 point confidence penalty
 
 ### Confidence Scoring
 
@@ -151,6 +158,8 @@ Each lead receives a confidence score (0-100) based on:
 | `year_built` | INT | Year property was built |
 | `sqft` | FLOAT | Finished square footage |
 | `acreage` | FLOAT | Property acreage |
+| `beds` | INT | Number of bedrooms |
+| `baths` | FLOAT | Total bathrooms (half baths = 0.5) |
 | `land_use` | STRING | Land use description |
 | `avg_similarity` | FLOAT | Average similarity score of comps |
 | `avg_comp_distance_miles` | FLOAT | Average distance to comps |
@@ -230,6 +239,8 @@ python analysis/generate_leads.py \
 | `--sqft-range` | 25 | Square footage % range (+/-) for comparables |
 | `--acreage-range` | 15 | Acreage % range (+/-) for comparables |
 | `--max-distance` | 3.0 | Maximum distance in miles for comparables |
+| `--bed-range` | 0 | Bedroom range (+/-) for comparables (0 = exact match) |
+| `--bath-range` | 0 | Bathroom range (+/-) for comparables (0 = exact match) |
 | `--min-comparables` | 3 | Minimum comps required for inclusion |
 | `--exclude-recent-sales` | 730 | Exclude sales within N days |
 | `--zipcode` | (none) | Restrict to single zip code (for testing) |

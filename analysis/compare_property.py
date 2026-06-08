@@ -50,6 +50,9 @@ class SubjectProperty:
     finished_area: Optional[float]
     structure_type: Optional[str]
     exterior: Optional[str]
+    beds: Optional[int]
+    baths: Optional[int]
+    half_baths: Optional[int]
     sale_price: Optional[float]
     sale_date: Optional[str]
 
@@ -64,6 +67,13 @@ class SubjectProperty:
         if self.acres and self.acres > 0:
             return self.total_appraisal / self.acres
         return None
+
+    @property
+    def total_baths(self) -> Optional[float]:
+        """Total bathrooms including half baths as 0.5."""
+        if self.baths is None and self.half_baths is None:
+            return None
+        return (self.baths or 0) + (self.half_baths or 0) * 0.5
 
     @property
     def assessment_to_sale_ratio(self) -> Optional[float]:
@@ -219,10 +229,15 @@ def lookup_property_by_address(client: bigquery.Client, address: str,
         b.year_built,
         b.finished_area,
         b.structure_type,
-        b.exterior
+        b.exterior,
+        bb.beds,
+        bb.baths,
+        bb.half_baths
     FROM `{project}.{dataset}.davidson_parcels` p
     LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
         ON p.STANPAR = b.apn
+    LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb
+        ON CAST(p.ParID AS STRING) = bb.parcel_id
     WHERE UPPER(p.PropAddr) LIKE UPPER(@address_pattern)
     LIMIT 10
     """
@@ -245,7 +260,7 @@ def lookup_property_by_parid(client: bigquery.Client, parid: str,
         parid_float = float(parid)
     except ValueError:
         return []
-    
+
     query = f"""
     SELECT DISTINCT
         p.ParID,
@@ -264,10 +279,15 @@ def lookup_property_by_parid(client: bigquery.Client, parid: str,
         b.year_built,
         b.finished_area,
         b.structure_type,
-        b.exterior
+        b.exterior,
+        bb.beds,
+        bb.baths,
+        bb.half_baths
     FROM `{project}.{dataset}.davidson_parcels` p
     LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
         ON p.STANPAR = b.apn
+    LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb
+        ON CAST(p.ParID AS STRING) = bb.parcel_id
     WHERE p.ParID = @parid
     LIMIT 1
     """
@@ -300,6 +320,9 @@ def dict_to_subject(row: Dict) -> SubjectProperty:
         finished_area=float(row.get("finished_area")) if row.get("finished_area") else None,
         structure_type=row.get("structure_type"),
         exterior=row.get("exterior"),
+        beds=int(row.get("beds")) if row.get("beds") else None,
+        baths=int(row.get("baths")) if row.get("baths") else None,
+        half_baths=int(row.get("half_baths")) if row.get("half_baths") else None,
         sale_price=float(row.get("SalePrice")) if row.get("SalePrice") else None,
         sale_date=row.get("SaleDate"),
     )
@@ -1021,6 +1044,10 @@ def format_text_report(result: ComparisonResult) -> str:
         lines.append(f"  Year Built:     {s.year_built}")
     if s.finished_area:
         lines.append(f"  Square Feet:    {s.finished_area:,.0f}")
+    if s.beds is not None or s.baths is not None:
+        bed_str = f"{s.beds}" if s.beds else "?"
+        bath_str = f"{s.total_baths:.1f}".rstrip('0').rstrip('.') if s.total_baths else "?"
+        lines.append(f"  Beds/Baths:     {bed_str} bed / {bath_str} bath")
     if s.structure_type:
         lines.append(f"  Structure:      {s.structure_type}")
     if s.exterior:

@@ -31,6 +31,8 @@ DEFAULT_YEAR_RANGE = 10
 DEFAULT_SQFT_RANGE = 25
 DEFAULT_ACREAGE_RANGE = 15
 DEFAULT_MAX_DISTANCE = 3.0  # miles
+DEFAULT_BED_RANGE = 0  # exact match by default
+DEFAULT_BATH_RANGE = 0  # exact match by default
 DEFAULT_MIN_COMPARABLES = 3  # lowered since we now use quality-based confidence
 DEFAULT_EXCLUDE_RECENT_SALES = 730  # 2 years in days
 DEFAULT_BQ_PROJECT = "public-data-dev"
@@ -56,6 +58,8 @@ class Lead:
     year_built: Optional[int]
     sqft: Optional[float]
     acreage: Optional[float]
+    beds: Optional[int]
+    baths: Optional[float]  # float to support half baths (e.g., 2.5)
     land_use: str
     zip_code: str
     confidence_score: float
@@ -74,6 +78,8 @@ def build_leads_query(
     year_range: int = DEFAULT_YEAR_RANGE,
     acreage_range: int = DEFAULT_ACREAGE_RANGE,
     max_distance: float = DEFAULT_MAX_DISTANCE,
+    bed_range: int = DEFAULT_BED_RANGE,
+    bath_range: int = DEFAULT_BATH_RANGE,
     zipcode: Optional[str] = None,
     limit: Optional[int] = None
 ) -> str:
@@ -93,7 +99,7 @@ def build_leads_query(
 
     query = f"""
     WITH enriched_parcels AS (
-      -- Base property data with building characteristics
+      -- Base property data with building characteristics and bed/bath data
       SELECT
         p.ParID,
         p.PropAddr,
@@ -112,9 +118,14 @@ def build_leads_query(
         p.OwnDate,
         b.year_built,
         b.finished_area,
+        -- Bed/bath data (half baths count as 0.5)
+        bb.beds,
+        COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths,
+        bb.beds IS NOT NULL AS has_bed_bath_data,
         COALESCE(fz.in_flood_zone, FALSE) AS in_flood_zone
       FROM `{project}.{dataset}.davidson_parcels` p
       LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b ON p.STANPAR = b.apn
+      LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb ON CAST(p.ParID AS STRING) = bb.parcel_id
       LEFT JOIN `{project}.{dataset}.v_parcel_floodzone_enrichment` fz ON p.ParID = fz.parcel_id
       WHERE p.TotlAppr > 0
         AND p.LUDesc = 'SINGLE FAMILY'
@@ -140,17 +151,27 @@ def build_leads_query(
         p.ParID,
         c.ParID AS comp_parid,
         c.TotlAppr AS comp_appraisal,
+        p.has_bed_bath_data,
         -- Distance in miles
         ST_DISTANCE(ST_GEOGPOINT(p.Lon, p.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / 1609.34 AS distance_miles,
         -- Similarity score (lower = more similar)
-        -- Weighted: sqft 35%, year 25%, acreage 20%, distance 20%
-        ABS(p.year_built - c.year_built) / {year_range} * 0.25 +
-        ABS(p.finished_area - c.finished_area) / NULLIF(p.finished_area, 0) * 0.35 +
+        -- Weighted: sqft 25%, year 20%, acreage 15%, distance 20%, beds 10%, baths 10%
+        ABS(p.year_built - c.year_built) / {year_range} * 0.20 +
+        ABS(p.finished_area - c.finished_area) / NULLIF(p.finished_area, 0) * 0.25 +
         CASE
           WHEN p.Acres IS NULL OR p.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0 THEN 0
-          ELSE ABS(p.Acres - c.Acres) / NULLIF(p.Acres, 0) * 0.2
+          ELSE ABS(p.Acres - c.Acres) / NULLIF(p.Acres, 0) * 0.15
         END +
-        ST_DISTANCE(ST_GEOGPOINT(p.Lon, p.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / {max_distance_meters} * 0.2
+        ST_DISTANCE(ST_GEOGPOINT(p.Lon, p.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / {max_distance_meters} * 0.20 +
+        -- Bed/bath similarity (if data available)
+        CASE
+          WHEN p.beds IS NULL OR c.beds IS NULL THEN 0.05  -- Small penalty for missing data
+          ELSE ABS(p.beds - c.beds) / GREATEST(p.beds, 1) * 0.10
+        END +
+        CASE
+          WHEN p.total_baths IS NULL OR c.total_baths IS NULL THEN 0.05  -- Small penalty for missing data
+          ELSE ABS(p.total_baths - c.total_baths) / GREATEST(p.total_baths, 1) * 0.10
+        END
         AS similarity_score
       FROM enriched_parcels p
       JOIN enriched_parcels c ON
@@ -166,6 +187,16 @@ def build_leads_query(
         AND (
           p.Acres IS NULL OR p.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0
           OR c.Acres BETWEEN p.Acres * {acreage_min_factor} AND p.Acres * {acreage_max_factor}
+        )
+        -- Beds: exact match or within range (skip filter if either has null beds)
+        AND (
+          p.beds IS NULL OR c.beds IS NULL
+          OR c.beds BETWEEN p.beds - {bed_range} AND p.beds + {bed_range}
+        )
+        -- Baths: exact match or within range (skip filter if either has null baths)
+        AND (
+          p.total_baths IS NULL OR c.total_baths IS NULL
+          OR c.total_baths BETWEEN p.total_baths - {bath_range} AND p.total_baths + {bath_range}
         )
     ),
     ranked_comps AS (
@@ -187,7 +218,9 @@ def build_leads_query(
         COUNT(*) AS comps_used,
         AVG(similarity_score) AS avg_similarity,
         AVG(distance_miles) AS avg_distance_miles,
-        APPROX_QUANTILES(comp_appraisal, 100)[OFFSET(50)] AS median_assessment
+        APPROX_QUANTILES(comp_appraisal, 100)[OFFSET(50)] AS median_assessment,
+        -- Track if subject has bed/bath data
+        LOGICAL_OR(has_bed_bath_data) AS has_bed_bath_data
       FROM top_comps
       GROUP BY ParID, total_comps
     ),
@@ -199,6 +232,9 @@ def build_leads_query(
         p.LUDesc,
         p.TotlAppr,
         p.Acres,
+        p.beds,
+        p.total_baths,
+        p.has_bed_bath_data,
         p.Owner,
         p.OwnAddr1,
         p.OwnCity,
@@ -230,6 +266,8 @@ def build_leads_query(
               WHEN s.avg_similarity < 0.40 THEN 10
               ELSE 0
             END
+          -- Penalty for missing bed/bath data (-10 points)
+          - CASE WHEN p.has_bed_bath_data THEN 0 ELSE 10 END
         )) AS confidence_score
       FROM enriched_parcels p
       JOIN comp_stats s ON p.ParID = s.ParID
@@ -256,6 +294,8 @@ def fetch_leads(
     year_range: int = DEFAULT_YEAR_RANGE,
     acreage_range: int = DEFAULT_ACREAGE_RANGE,
     max_distance: float = DEFAULT_MAX_DISTANCE,
+    bed_range: int = DEFAULT_BED_RANGE,
+    bath_range: int = DEFAULT_BATH_RANGE,
     zipcode: Optional[str] = None,
     limit: Optional[int] = None
 ) -> List[Lead]:
@@ -271,6 +311,8 @@ def fetch_leads(
         year_range=year_range,
         acreage_range=acreage_range,
         max_distance=max_distance,
+        bed_range=bed_range,
+        bath_range=bath_range,
         zipcode=zipcode,
         limit=limit
     )
@@ -308,6 +350,8 @@ def fetch_leads(
             year_built=int(row.year_built) if row.year_built else None,
             sqft=float(row.finished_area) if row.finished_area else None,
             acreage=float(row.Acres) if row.Acres else None,
+            beds=int(row.beds) if row.beds else None,
+            baths=float(row.total_baths) if row.total_baths else None,
             land_use=row.LUDesc or "",
             zip_code=row.PropZip or "",
             confidence_score=float(row.confidence_score),
@@ -329,7 +373,7 @@ def format_csv(leads: List[Lead]) -> str:
         "parid", "address", "owner_name", "owner_address",
         "current_assessment", "median_comparable", "over_assessment",
         "estimated_savings", "num_comparables", "confidence_score",
-        "year_built", "sqft", "acreage", "land_use",
+        "year_built", "sqft", "acreage", "beds", "baths", "land_use",
         "avg_similarity", "avg_comp_distance_miles", "in_flood_zone"
     ]
 
@@ -354,6 +398,8 @@ def format_csv(leads: List[Lead]) -> str:
             "year_built": lead.year_built if lead.year_built else "",
             "sqft": f"{lead.sqft:.0f}" if lead.sqft else "",
             "acreage": f"{lead.acreage:.2f}" if lead.acreage else "",
+            "beds": lead.beds if lead.beds else "",
+            "baths": f"{lead.baths:.1f}" if lead.baths else "",
             "land_use": lead.land_use,
             "avg_similarity": f"{lead.avg_similarity:.3f}",
             "avg_comp_distance_miles": f"{lead.avg_comp_distance_miles:.2f}",
@@ -464,6 +510,18 @@ Examples:
         help=f"Maximum distance in miles for comparables (default: {DEFAULT_MAX_DISTANCE})"
     )
     parser.add_argument(
+        "--bed-range",
+        type=int,
+        default=DEFAULT_BED_RANGE,
+        help=f"Bedroom range +/- for comparables (default: {DEFAULT_BED_RANGE} = exact match)"
+    )
+    parser.add_argument(
+        "--bath-range",
+        type=int,
+        default=DEFAULT_BATH_RANGE,
+        help=f"Bathroom range +/- for comparables (default: {DEFAULT_BATH_RANGE} = exact match)"
+    )
+    parser.add_argument(
         "--min-comparables",
         type=int,
         default=DEFAULT_MIN_COMPARABLES,
@@ -536,6 +594,8 @@ Examples:
             year_range=args.year_range,
             acreage_range=args.acreage_range,
             max_distance=args.max_distance,
+            bed_range=args.bed_range,
+            bath_range=args.bath_range,
             zipcode=args.zipcode,
             limit=args.limit
         )
@@ -560,6 +620,8 @@ Examples:
         year_range=args.year_range,
         acreage_range=args.acreage_range,
         max_distance=args.max_distance,
+        bed_range=args.bed_range,
+        bath_range=args.bath_range,
         zipcode=args.zipcode,
         limit=args.limit
     )
