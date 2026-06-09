@@ -24,6 +24,7 @@ FULL RUN:
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -49,7 +50,7 @@ SUMMARY_URL = PORTAL_BASE + "/OFS/WP/Summary/{internal_id}/1/false"
 
 CONCURRENCY = 2       # parallel workers; increase if the server handles it
 BATCH_SIZE = 500      # rows written to BigQuery at a time
-RATE_LIMIT_DELAY = 2  # seconds between requests per worker
+RATE_LIMIT_DELAY = 3  # seconds between requests per worker
 
 # ---------------------------------------------------------------------------
 # Static DevExpress fields — same on every request (from DevTools Payload tab)
@@ -344,15 +345,17 @@ def load_parcels_from_bq(
     limit: int | None = None,
     skip_existing: bool = True,
     single_family_only: bool = True,
+    zip_codes: list[str] | None = None,
 ) -> list[dict]:
     """
     Read parcels from davidson_parcels, skipping any already in davidson_bed_bath.
 
-    skip_existing=True makes the run resumable — if it crashes at parcel 150K
-    you can restart and it picks up where it left off without duplicates.
-    Set skip_existing=False to force a full re-scrape.
+    skip_existing=True makes the run resumable — if it crashes midway you can
+    restart and it picks up where it left off without duplicates.
 
     single_family_only=True (default) restricts to LUDesc = 'SINGLE FAMILY'.
+
+    zip_codes accepts one or many zip codes, e.g. ['37206'] or ['37206','37207'].
     """
     limit_clause = f"LIMIT {limit}" if limit else ""
     skip_clause = f"""
@@ -364,6 +367,12 @@ def load_parcels_from_bq(
     """ if skip_existing else ""
     sfh_clause = "AND LUDesc = 'SINGLE FAMILY'" if single_family_only else ""
 
+    if zip_codes:
+        zips = ", ".join(f"'{z.strip()}'" for z in zip_codes)
+        zip_clause = f"AND PropZip IN ({zips})"
+    else:
+        zip_clause = ""
+
     query = f"""
         SELECT
             ParID       AS parcel_id,
@@ -373,10 +382,11 @@ def load_parcels_from_bq(
         FROM `{BQ_PROJECT}.{BQ_SOURCE_TABLE}`
         WHERE PropHouse IS NOT NULL AND PropStreet IS NOT NULL
         {sfh_clause}
+        {zip_clause}
         {skip_clause}
         {limit_clause}
     """
-    log.info("Loading parcels from BigQuery (skip_existing=%s)...", skip_existing)
+    log.info("Loading parcels from BigQuery (skip_existing=%s, zip_codes=%s)...", skip_existing, zip_codes)
     rows = list(client.query(query).result())
     log.info("Loaded %d parcels to scrape", len(rows))
     return [dict(r) for r in rows]
@@ -425,8 +435,11 @@ async def worker(
             if parcel is None:
                 queue.task_done()
                 break
-            log.info("[w%d] %s", worker_id, parcel["parcel_id"])
+            t0 = time.monotonic()
             result = await scrape_parcel(client, parcel, headers)
+            elapsed = time.monotonic() - t0
+            status = "OK" if result.error is None else f"ERR: {result.error}"
+            log.info("[w%d] %s — %s (%.1fs)", worker_id, parcel["address"], status, elapsed)
             results.append(result)
             queue.task_done()
 
@@ -455,9 +468,33 @@ async def test_one(house_number: str = "1810", street_name: str = "EASTLAND AVE"
 # ---------------------------------------------------------------------------
 # Full BigQuery run
 # ---------------------------------------------------------------------------
-async def run_scraper(limit: int | None = None, single_family_only: bool = True) -> None:
+async def run_scraper(
+    limit: int | None = None,
+    single_family_only: bool = True,
+    zip_codes: list[str] | None = None,
+) -> None:
     bq_client = bigquery.Client(project=BQ_PROJECT)
-    parcels = load_parcels_from_bq(bq_client, limit=limit, single_family_only=single_family_only)
+    parcels = load_parcels_from_bq(
+        bq_client,
+        limit=limit,
+        single_family_only=single_family_only,
+        zip_codes=zip_codes,
+    )
+
+    total = len(parcels)
+    avg_secs_per_parcel = 6.5  # observed: ~3.5s requests + 3s rate limit delay
+    est_seconds = (total * avg_secs_per_parcel) / CONCURRENCY
+    est_hours = est_seconds / 3600
+    print(f"\n{'='*55}")
+    print(f"  Parcels to scrape : {total:,}")
+    print(f"  Concurrency       : {CONCURRENCY} workers")
+    print(f"  Rate limit delay  : {RATE_LIMIT_DELAY}s per worker")
+    print(f"  Estimated time    : {est_hours:.1f} hours ({est_seconds/60:.0f} min)")
+    print(f"{'='*55}\n")
+
+    if total == 0:
+        log.info("Nothing to scrape — exiting.")
+        return
 
     queue: asyncio.Queue = asyncio.Queue()
     for p in parcels:
@@ -465,17 +502,19 @@ async def run_scraper(limit: int | None = None, single_family_only: bool = True)
     for _ in range(CONCURRENCY):
         await queue.put(None)  # poison pills to stop workers
 
+    run_start = time.monotonic()
     results: list[PropertyResult] = []
     await asyncio.gather(*[
         asyncio.create_task(worker(i, queue, results))
         for i in range(CONCURRENCY)
     ])
+    elapsed = time.monotonic() - run_start
 
     for i in range(0, len(results), BATCH_SIZE):
         write_results_to_bq(bq_client, results[i : i + BATCH_SIZE])
 
     ok = sum(1 for r in results if r.error is None)
-    log.info("Done. %d/%d succeeded.", ok, len(results))
+    log.info("Done. %d/%d succeeded in %.1f min.", ok, len(results), elapsed / 60)
 
 
 # ---------------------------------------------------------------------------
@@ -484,10 +523,15 @@ async def run_scraper(limit: int | None = None, single_family_only: bool = True)
 if __name__ == "__main__":
     # --- Smoke test (no BigQuery) ---
     # asyncio.run(test_one("3051", "UNION HILL RD"))
-    asyncio.run(run_scraper(limit=100))
 
-    # --- Small batch from BigQuery (uncomment to use) ---
-    # asyncio.run(run_scraper(limit=5))
+    # --- Single zip code ---
+    # asyncio.run(run_scraper(zip_codes=["37206"]))
 
-    # --- Full 200K run (uncomment when ready) ---
-    # asyncio.run(run_scraper())
+    # --- Multiple zip codes ---
+    asyncio.run(run_scraper(zip_codes=["37205", "37215"]))
+
+    # --- Zip codes with a limit ---
+    # asyncio.run(run_scraper(zip_codes=["37206"], limit=500))
+
+    # --- Full run (all single family, no zip filter) ---
+    # asyncio.run(run_scraper(limit=10000))
