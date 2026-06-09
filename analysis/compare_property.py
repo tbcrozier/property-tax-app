@@ -237,7 +237,7 @@ def lookup_property_by_address(client: bigquery.Client, address: str,
     LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
         ON p.STANPAR = b.apn
     LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb
-        ON CAST(p.ParID AS STRING) = bb.parcel_id
+        ON p.ParID = bb.parcel_id
     WHERE UPPER(p.PropAddr) LIKE UPPER(@address_pattern)
     LIMIT 10
     """
@@ -255,12 +255,6 @@ def lookup_property_by_address(client: bigquery.Client, address: str,
 def lookup_property_by_parid(client: bigquery.Client, parid: str,
                               project: str, dataset: str) -> List[Dict]:
     """Look up a property by ParID."""
-    # Convert parid to float to match BigQuery type (ParID is stored as FLOAT64)
-    try:
-        parid_float = float(parid)
-    except ValueError:
-        return []
-
     query = f"""
     SELECT DISTINCT
         p.ParID,
@@ -287,14 +281,14 @@ def lookup_property_by_parid(client: bigquery.Client, parid: str,
     LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
         ON p.STANPAR = b.apn
     LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb
-        ON CAST(p.ParID AS STRING) = bb.parcel_id
+        ON p.ParID = bb.parcel_id
     WHERE p.ParID = @parid
     LIMIT 1
     """
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("parid", "FLOAT64", parid_float)
+            bigquery.ScalarQueryParameter("parid", "STRING", parid)
         ]
     )
 
@@ -350,6 +344,8 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
             b.finished_area,
             b.structure_type,
             b.exterior,
+            bb.beds,
+            COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths,
             SAFE_DIVIDE(p.TotlAppr, b.finished_area) AS price_per_sqft,
             -- Assessment to sale ratio (only for valid sales >= $10k)
             CASE
@@ -371,6 +367,8 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
         FROM `{project}.{dataset}.davidson_parcels` p
         LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
             ON p.STANPAR = b.apn
+        LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb
+            ON p.ParID = bb.parcel_id
         WHERE
             p.ParID != @subject_parid
             AND p.PropZip = @zip_code
@@ -390,13 +388,25 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
     ranked AS (
         SELECT *,
             -- Composite similarity score (lower = more similar)
-            COALESCE(year_diff / 10.0 * 0.3, 0.15) +
-            COALESCE(sqft_diff_pct / 100.0 * 0.4, 0.2) +
+            -- Weights: sqft 25%, year 20%, acreage 15%, structure 10%, beds 10%, baths 10%, distance 10%
+            COALESCE(year_diff / 10.0 * 0.20, 0.10) +
+            COALESCE(sqft_diff_pct / 100.0 * 0.25, 0.125) +
             COALESCE(
-                SAFE_DIVIDE(ABS(Acres - @subject_acres), NULLIF(@subject_acres, 0)) * 0.2,
-                0.1
+                SAFE_DIVIDE(ABS(Acres - @subject_acres), NULLIF(@subject_acres, 0)) * 0.15,
+                0.075
             ) +
-            CASE WHEN structure_type = @subject_structure_type THEN 0 ELSE 0.1 END
+            CASE WHEN structure_type = @subject_structure_type THEN 0 ELSE 0.10 END +
+            -- Bed/bath similarity
+            CASE
+                WHEN beds IS NULL OR @subject_beds IS NULL THEN 0.05
+                ELSE SAFE_DIVIDE(ABS(beds - @subject_beds), GREATEST(@subject_beds, 1)) * 0.10
+            END +
+            CASE
+                WHEN total_baths IS NULL OR @subject_baths IS NULL THEN 0.05
+                ELSE SAFE_DIVIDE(ABS(total_baths - @subject_baths), GREATEST(@subject_baths, 1)) * 0.10
+            END +
+            -- Distance factor (normalized to ~3 miles max)
+            COALESCE(SAFE_DIVIDE(distance_meters, 4828.0) * 0.10, 0.05)
             AS similarity_score
         FROM comparables
     )
@@ -417,6 +427,8 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
             bigquery.ScalarQueryParameter("subject_lat", "FLOAT64", subject.latitude or 0),
             bigquery.ScalarQueryParameter("subject_lon", "FLOAT64", subject.longitude or 0),
             bigquery.ScalarQueryParameter("subject_structure_type", "STRING", subject.structure_type),
+            bigquery.ScalarQueryParameter("subject_beds", "INT64", subject.beds),
+            bigquery.ScalarQueryParameter("subject_baths", "FLOAT64", subject.total_baths),
             bigquery.ScalarQueryParameter("year_min", "INT64", criteria.year_built_min),
             bigquery.ScalarQueryParameter("year_max", "INT64", criteria.year_built_max),
             bigquery.ScalarQueryParameter("sqft_min", "FLOAT64", criteria.sqft_min),
@@ -1048,6 +1060,8 @@ def format_text_report(result: ComparisonResult) -> str:
         bed_str = f"{s.beds}" if s.beds else "?"
         bath_str = f"{s.total_baths:.1f}".rstrip('0').rstrip('.') if s.total_baths else "?"
         lines.append(f"  Beds/Baths:     {bed_str} bed / {bath_str} bath")
+    else:
+        lines.append(f"  Beds/Baths:     N/A (no data)")
     if s.structure_type:
         lines.append(f"  Structure:      {s.structure_type}")
     if s.exterior:

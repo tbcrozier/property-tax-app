@@ -27,10 +27,10 @@ from google.cloud import bigquery
 
 # Configuration defaults
 DEFAULT_MIN_SAVINGS = 1500
-DEFAULT_YEAR_RANGE = 10
-DEFAULT_SQFT_RANGE = 25
-DEFAULT_ACREAGE_RANGE = 15
-DEFAULT_MAX_DISTANCE = 3.0  # miles
+DEFAULT_YEAR_RANGE = 7
+DEFAULT_SQFT_RANGE = 15
+DEFAULT_ACREAGE_RANGE = 10
+DEFAULT_MAX_DISTANCE = 2.0  # miles
 DEFAULT_BED_RANGE = 0  # exact match by default
 DEFAULT_BATH_RANGE = 0  # exact match by default
 DEFAULT_MIN_COMPARABLES = 3  # lowered since we now use quality-based confidence
@@ -81,6 +81,7 @@ def build_leads_query(
     bed_range: int = DEFAULT_BED_RANGE,
     bath_range: int = DEFAULT_BATH_RANGE,
     zipcode: Optional[str] = None,
+    require_bed_bath: bool = False,
     limit: Optional[int] = None
 ) -> str:
     """Build the SQL query for finding appeal leads using percentage-based comparable criteria."""
@@ -89,6 +90,9 @@ def build_leads_query(
 
     # Optional zipcode filter for cost-controlled testing
     zipcode_filter = f"AND p.PropZip = '{zipcode}'" if zipcode else ""
+
+    # Optional filter to require bed/bath data
+    bed_bath_filter = "AND bb.beds IS NOT NULL" if require_bed_bath else ""
 
     # Convert parameters to decimals for SQL
     sqft_min_factor = 1 - (sqft_range / 100)  # e.g., 0.75 for 25%
@@ -125,13 +129,14 @@ def build_leads_query(
         COALESCE(fz.in_flood_zone, FALSE) AS in_flood_zone
       FROM `{project}.{dataset}.davidson_parcels` p
       LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b ON p.STANPAR = b.apn
-      LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb ON CAST(p.ParID AS STRING) = bb.parcel_id
+      LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb ON p.ParID = bb.parcel_id
       LEFT JOIN `{project}.{dataset}.v_parcel_floodzone_enrichment` fz ON p.ParID = fz.parcel_id
       WHERE p.TotlAppr > 0
         AND p.LUDesc = 'SINGLE FAMILY'
         AND p.Lat IS NOT NULL AND p.Lon IS NOT NULL
         AND b.year_built IS NOT NULL AND b.finished_area IS NOT NULL
         {zipcode_filter}
+        {bed_bath_filter}
         -- Exclude recent sales (last N days)
         AND (p.OwnDate IS NULL OR p.OwnDate < DATE_SUB(CURRENT_DATE(), INTERVAL {exclude_recent_sales_days} DAY))
         -- Exclude properties where a valid recent sale validates the assessment
@@ -297,6 +302,7 @@ def fetch_leads(
     bed_range: int = DEFAULT_BED_RANGE,
     bath_range: int = DEFAULT_BATH_RANGE,
     zipcode: Optional[str] = None,
+    require_bed_bath: bool = False,
     limit: Optional[int] = None
 ) -> List[Lead]:
     """Execute the leads query and return Lead objects."""
@@ -314,6 +320,7 @@ def fetch_leads(
         bed_range=bed_range,
         bath_range=bath_range,
         zipcode=zipcode,
+        require_bed_bath=require_bed_bath,
         limit=limit
     )
 
@@ -539,6 +546,11 @@ Examples:
         default=None,
         help="Restrict to a single zip code (for cost-controlled testing)"
     )
+    parser.add_argument(
+        "--require-bed-bath",
+        action="store_true",
+        help="Only include properties with bed/bath data"
+    )
 
     # Output options
     parser.add_argument(
@@ -597,6 +609,7 @@ Examples:
             bed_range=args.bed_range,
             bath_range=args.bath_range,
             zipcode=args.zipcode,
+            require_bed_bath=args.require_bed_bath,
             limit=args.limit
         )
         print(query)
@@ -608,7 +621,8 @@ Examples:
 
     # Fetch leads
     zipcode_msg = f" in zip code {args.zipcode}" if args.zipcode else ""
-    print(f"Finding leads with minimum savings >= ${args.min_savings:.0f}{zipcode_msg}...", file=sys.stderr)
+    bed_bath_msg = " (requiring bed/bath data)" if args.require_bed_bath else ""
+    print(f"Finding leads with minimum savings >= ${args.min_savings:.0f}{zipcode_msg}{bed_bath_msg}...", file=sys.stderr)
     leads = fetch_leads(
         client=client,
         project=args.project,
@@ -623,6 +637,7 @@ Examples:
         bed_range=args.bed_range,
         bath_range=args.bath_range,
         zipcode=args.zipcode,
+        require_bed_bath=args.require_bed_bath,
         limit=args.limit
     )
 

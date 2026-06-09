@@ -91,10 +91,10 @@ Each subject property finds its own custom comparable set based on:
 
 | Dimension | Matching Logic | Default |
 |-----------|----------------|---------|
-| **Distance** | Within X miles of subject (geographic) | 3 miles |
-| **Square Footage** | Within ±X% of subject sqft | ±25% |
-| **Year Built** | Within ±X years of subject | ±10 years |
-| **Acreage** | Within ±X% of subject acreage | ±15% |
+| **Distance** | Within X miles of subject (geographic) | 2 miles |
+| **Square Footage** | Within ±X% of subject sqft | ±15% |
+| **Year Built** | Within ±X years of subject | ±7 years |
+| **Acreage** | Within ±X% of subject acreage | ±10% |
 | **Bedrooms** | Within ±X beds of subject | Exact match (0) |
 | **Bathrooms** | Within ±X baths of subject | Exact match (0) |
 | **Land Use** | Same LUDesc (SINGLE FAMILY) | Required |
@@ -219,15 +219,15 @@ python analysis/generate_leads.py \
   --output leads.json
 ```
 
-#### Custom Comparable Criteria
+#### Wider Comparable Criteria (More Comps)
 
 ```bash
 python analysis/generate_leads.py \
-  --sqft-range 20 \
-  --year-range 15 \
-  --acreage-range 10 \
-  --max-distance 2.0 \
-  --output conservative_leads.csv
+  --sqft-range 25 \
+  --year-range 10 \
+  --acreage-range 15 \
+  --max-distance 3.0 \
+  --output wider_leads.csv
 ```
 
 ### CLI Options Reference
@@ -235,10 +235,10 @@ python analysis/generate_leads.py \
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--min-savings` | 1500 | Minimum first-year tax savings to qualify |
-| `--year-range` | 10 | Year built range (+/- years) for comparables |
-| `--sqft-range` | 25 | Square footage % range (+/-) for comparables |
-| `--acreage-range` | 15 | Acreage % range (+/-) for comparables |
-| `--max-distance` | 3.0 | Maximum distance in miles for comparables |
+| `--year-range` | 7 | Year built range (+/- years) for comparables |
+| `--sqft-range` | 15 | Square footage % range (+/-) for comparables |
+| `--acreage-range` | 10 | Acreage % range (+/-) for comparables |
+| `--max-distance` | 2.0 | Maximum distance in miles for comparables |
 | `--bed-range` | 0 | Bedroom range (+/-) for comparables (0 = exact match) |
 | `--bath-range` | 0 | Bathroom range (+/-) for comparables (0 = exact match) |
 | `--min-comparables` | 3 | Minimum comps required for inclusion |

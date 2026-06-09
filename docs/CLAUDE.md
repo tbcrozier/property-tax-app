@@ -230,9 +230,9 @@ The `analysis/` folder contains Python scripts for property analysis and lead ge
 Batch lead generator that identifies over-assessed single family properties across Davidson County.
 
 **Key features:**
-- Percentage-based comparable criteria (±25% sqft, ±10 years, ±15% acreage)
+- Percentage-based comparable criteria (±15% sqft, ±7 years, ±10% acreage)
 - Bed/bath matching (exact match by default, configurable range)
-- Distance-based filtering (default 3 miles) instead of zip code
+- Distance-based filtering (default 2 miles) instead of zip code
 - Similarity-weighted ranking (top 20 most similar comps)
 - Confidence scoring (0-100) based on comp quality
 - Sale validation filter (excludes properties where recent sale validates assessment)
