@@ -232,4 +232,4 @@ override.tf.json
 
 /parcels/st_louis/data/features.csv
 
-/leads.csv
+analysis/*.csv

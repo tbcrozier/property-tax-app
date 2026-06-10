@@ -27,7 +27,6 @@ DEFAULT_SQFT_RANGE_PCT = 25
 DEFAULT_ACRE_RANGE_PCT = 50  # Wider range for acreage since land sizes vary more
 DEFAULT_MIN_COMPARABLES = 5
 DEFAULT_MAX_COMPARABLES = 20
-DEFAULT_SALE_DAYS = 730  # 2 years
 DEFAULT_BQ_PROJECT = "public-data-dev"
 DEFAULT_BQ_DATASET = "property_tax"
 
@@ -50,6 +49,9 @@ class SubjectProperty:
     finished_area: Optional[float]
     structure_type: Optional[str]
     exterior: Optional[str]
+    beds: Optional[int]
+    baths: Optional[int]
+    half_baths: Optional[int]
     sale_price: Optional[float]
     sale_date: Optional[str]
 
@@ -64,6 +66,13 @@ class SubjectProperty:
         if self.acres and self.acres > 0:
             return self.total_appraisal / self.acres
         return None
+
+    @property
+    def total_baths(self) -> Optional[float]:
+        """Total bathrooms including half baths as 0.5."""
+        if self.baths is None and self.half_baths is None:
+            return None
+        return (self.baths or 0) + (self.half_baths or 0) * 0.5
 
     @property
     def assessment_to_sale_ratio(self) -> Optional[float]:
@@ -85,6 +94,8 @@ class ComparableProperty:
     finished_area: Optional[float]
     structure_type: Optional[str]
     exterior: Optional[str]
+    beds: Optional[int]
+    baths: Optional[float]  # Total baths including half baths as 0.5
     price_per_sqft: Optional[float]
     similarity_score: float
     year_diff: Optional[int]
@@ -202,7 +213,7 @@ def lookup_property_by_address(client: bigquery.Client, address: str,
                                 project: str, dataset: str) -> List[Dict]:
     """Look up properties matching an address pattern."""
     query = f"""
-    SELECT
+    SELECT DISTINCT
         p.ParID,
         p.STANPAR,
         p.PropAddr,
@@ -215,8 +226,19 @@ def lookup_property_by_address(client: bigquery.Client, address: str,
         p.Lat,
         p.Lon,
         p.SalePrice,
-        FORMAT_DATE('%Y-%m-%d', p.OwnDate) as SaleDate
+        FORMAT_DATE('%Y-%m-%d', p.OwnDate) as SaleDate,
+        b.year_built,
+        b.finished_area,
+        b.structure_type,
+        b.exterior,
+        bb.beds,
+        bb.baths,
+        bb.half_baths
     FROM `{project}.{dataset}.davidson_parcels` p
+    LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
+        ON p.STANPAR = b.apn
+    LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb
+        ON p.ParID = bb.parcel_id
     WHERE UPPER(p.PropAddr) LIKE UPPER(@address_pattern)
     LIMIT 10
     """
@@ -234,12 +256,6 @@ def lookup_property_by_address(client: bigquery.Client, address: str,
 def lookup_property_by_parid(client: bigquery.Client, parid: str,
                               project: str, dataset: str) -> List[Dict]:
     """Look up a property by ParID."""
-    # Convert parid to float to match BigQuery type (ParID is stored as FLOAT64)
-    try:
-        parid_float = float(parid)
-    except ValueError:
-        return []
-    
     query = f"""
     SELECT DISTINCT
         p.ParID,
@@ -258,17 +274,22 @@ def lookup_property_by_parid(client: bigquery.Client, parid: str,
         b.year_built,
         b.finished_area,
         b.structure_type,
-        b.exterior
+        b.exterior,
+        bb.beds,
+        bb.baths,
+        bb.half_baths
     FROM `{project}.{dataset}.davidson_parcels` p
     LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
         ON p.STANPAR = b.apn
+    LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb
+        ON p.ParID = bb.parcel_id
     WHERE p.ParID = @parid
     LIMIT 1
     """
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("parid", "FLOAT64", parid_float)
+            bigquery.ScalarQueryParameter("parid", "STRING", parid)
         ]
     )
 
@@ -294,6 +315,9 @@ def dict_to_subject(row: Dict) -> SubjectProperty:
         finished_area=float(row.get("finished_area")) if row.get("finished_area") else None,
         structure_type=row.get("structure_type"),
         exterior=row.get("exterior"),
+        beds=int(row.get("beds")) if row.get("beds") else None,
+        baths=int(row.get("baths")) if row.get("baths") else None,
+        half_baths=int(row.get("half_baths")) if row.get("half_baths") else None,
         sale_price=float(row.get("SalePrice")) if row.get("SalePrice") else None,
         sale_date=row.get("SaleDate"),
     )
@@ -321,6 +345,8 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
             b.finished_area,
             b.structure_type,
             b.exterior,
+            bb.beds,
+            COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths,
             SAFE_DIVIDE(p.TotlAppr, b.finished_area) AS price_per_sqft,
             -- Assessment to sale ratio (only for valid sales >= $10k)
             CASE
@@ -342,6 +368,8 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
         FROM `{project}.{dataset}.davidson_parcels` p
         LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
             ON p.STANPAR = b.apn
+        LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb
+            ON p.ParID = bb.parcel_id
         WHERE
             p.ParID != @subject_parid
             AND p.PropZip = @zip_code
@@ -361,13 +389,25 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
     ranked AS (
         SELECT *,
             -- Composite similarity score (lower = more similar)
-            COALESCE(year_diff / 10.0 * 0.3, 0.15) +
-            COALESCE(sqft_diff_pct / 100.0 * 0.4, 0.2) +
+            -- Weights: sqft 25%, year 20%, acreage 15%, structure 10%, beds 10%, baths 10%, distance 10%
+            COALESCE(year_diff / 10.0 * 0.20, 0.10) +
+            COALESCE(sqft_diff_pct / 100.0 * 0.25, 0.125) +
             COALESCE(
-                SAFE_DIVIDE(ABS(Acres - @subject_acres), NULLIF(@subject_acres, 0)) * 0.2,
-                0.1
+                SAFE_DIVIDE(ABS(Acres - @subject_acres), NULLIF(@subject_acres, 0)) * 0.15,
+                0.075
             ) +
-            CASE WHEN structure_type = @subject_structure_type THEN 0 ELSE 0.1 END
+            CASE WHEN structure_type = @subject_structure_type THEN 0 ELSE 0.10 END +
+            -- Bed/bath similarity
+            CASE
+                WHEN beds IS NULL OR @subject_beds IS NULL THEN 0.05
+                ELSE SAFE_DIVIDE(ABS(beds - @subject_beds), GREATEST(@subject_beds, 1)) * 0.10
+            END +
+            CASE
+                WHEN total_baths IS NULL OR @subject_baths IS NULL THEN 0.05
+                ELSE SAFE_DIVIDE(ABS(total_baths - @subject_baths), GREATEST(@subject_baths, 1)) * 0.10
+            END +
+            -- Distance factor (normalized to ~3 miles max)
+            COALESCE(SAFE_DIVIDE(distance_meters, 4828.0) * 0.10, 0.05)
             AS similarity_score
         FROM comparables
     )
@@ -388,6 +428,8 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
             bigquery.ScalarQueryParameter("subject_lat", "FLOAT64", subject.latitude or 0),
             bigquery.ScalarQueryParameter("subject_lon", "FLOAT64", subject.longitude or 0),
             bigquery.ScalarQueryParameter("subject_structure_type", "STRING", subject.structure_type),
+            bigquery.ScalarQueryParameter("subject_beds", "INT64", subject.beds),
+            bigquery.ScalarQueryParameter("subject_baths", "FLOAT64", subject.total_baths),
             bigquery.ScalarQueryParameter("year_min", "INT64", criteria.year_built_min),
             bigquery.ScalarQueryParameter("year_max", "INT64", criteria.year_built_max),
             bigquery.ScalarQueryParameter("sqft_min", "FLOAT64", criteria.sqft_min),
@@ -410,6 +452,8 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
             finished_area=float(row.finished_area) if row.finished_area else None,
             structure_type=row.structure_type,
             exterior=row.exterior,
+            beds=int(row.beds) if row.beds else None,
+            baths=float(row.total_baths) if row.total_baths else None,
             price_per_sqft=float(row.price_per_sqft) if row.price_per_sqft else None,
             similarity_score=float(row.similarity_score) if row.similarity_score else 0,
             year_diff=int(row.year_diff) if row.year_diff else None,
@@ -425,13 +469,12 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
 
 
 def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
-                          sale_days: int, max_comps: int,
-                          sqft_range_pct: int, acre_range_pct: int,
+                          max_comps: int, sqft_range_pct: int, acre_range_pct: int,
                           project: str, dataset: str) -> List[ComparableProperty]:
-    """Find comparable properties with recent sales, sorted by distance.
+    """Find comparable properties with 2025 sales, sorted by distance.
 
     This is the COMPER-style search that prioritizes:
-    1. Recent sales (within sale_days)
+    1. Sales from 2025
     2. Geographic proximity (distance from subject)
     3. Same land use type
     4. Similar square footage (+/- sqft_range_pct)
@@ -469,6 +512,8 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
         b.finished_area,
         b.structure_type,
         b.exterior,
+        bb.beds,
+        COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths,
         SAFE_DIVIDE(p.TotlAppr, b.finished_area) AS price_per_sqft,
         SAFE_DIVIDE(p.SalePrice, b.finished_area) AS sale_price_per_sqft,
         SAFE_DIVIDE(p.TotlAppr, p.SalePrice) AS assessment_to_sale_ratio,
@@ -480,11 +525,13 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
     FROM `{project}.{dataset}.davidson_parcels` p
     LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
         ON p.STANPAR = b.apn
+    LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb
+        ON p.ParID = bb.parcel_id
     WHERE
         p.ParID != @subject_parid
         AND p.LUDesc = @land_use
         AND p.SalePrice >= 10000  -- Filter nominal transfers
-        AND p.OwnDate >= DATE_SUB(CURRENT_DATE(), INTERVAL @sale_days DAY)
+        AND EXTRACT(YEAR FROM p.OwnDate) = 2025
         AND p.Lat IS NOT NULL
         AND p.Lon IS NOT NULL
         AND (
@@ -507,7 +554,6 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
             bigquery.ScalarQueryParameter("land_use", "STRING", subject.land_use),
             bigquery.ScalarQueryParameter("subject_lat", "FLOAT64", subject.latitude or 0),
             bigquery.ScalarQueryParameter("subject_lon", "FLOAT64", subject.longitude or 0),
-            bigquery.ScalarQueryParameter("sale_days", "INT64", sale_days),
             bigquery.ScalarQueryParameter("max_comps", "INT64", max_comps),
             bigquery.ScalarQueryParameter("sqft_min", "FLOAT64", sqft_min),
             bigquery.ScalarQueryParameter("sqft_max", "FLOAT64", sqft_max),
@@ -530,6 +576,8 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
             finished_area=float(row.finished_area) if row.finished_area else None,
             structure_type=row.structure_type,
             exterior=row.exterior,
+            beds=int(row.beds) if row.beds else None,
+            baths=float(row.total_baths) if row.total_baths else None,
             price_per_sqft=float(row.price_per_sqft) if row.price_per_sqft else None,
             similarity_score=0,  # Not used for sales-based search
             year_diff=None,
@@ -1015,6 +1063,12 @@ def format_text_report(result: ComparisonResult) -> str:
         lines.append(f"  Year Built:     {s.year_built}")
     if s.finished_area:
         lines.append(f"  Square Feet:    {s.finished_area:,.0f}")
+    if s.beds is not None or s.baths is not None:
+        bed_str = f"{s.beds}" if s.beds else "?"
+        bath_str = f"{s.total_baths:.1f}".rstrip('0').rstrip('.') if s.total_baths else "?"
+        lines.append(f"  Beds/Baths:     {bed_str} bed / {bath_str} bath")
+    else:
+        lines.append(f"  Beds/Baths:     N/A (no data)")
     if s.structure_type:
         lines.append(f"  Structure:      {s.structure_type}")
     if s.exterior:
@@ -1140,14 +1194,18 @@ def format_text_report(result: ComparisonResult) -> str:
     if result.comparables:
         lines.append(f"COMPARABLE PROPERTIES ({len(result.comparables)} total)")
         lines.append("-" * 80)
-        lines.append("  Address                         Year   SqFt    $/SqFt    Appraisal    Score")
-        lines.append("  " + "-" * 76)
+        lines.append("  Address                         Year   SqFt   Bed/Bath   $/SqFt    Appraisal    Score")
+        lines.append("  " + "-" * 88)
         for comp in result.comparables:
             addr = (comp.address[:30] if len(comp.address) > 30 else comp.address).ljust(30)
             year = str(comp.year_built) if comp.year_built else "N/A"
             sqft = f"{comp.finished_area:,.0f}" if comp.finished_area else "N/A"
+            # Format beds/baths
+            bed_str = str(comp.beds) if comp.beds else "?"
+            bath_str = f"{comp.baths:.1f}".rstrip('0').rstrip('.') if comp.baths else "?"
+            bed_bath = f"{bed_str}/{bath_str}"
             pps = f"${comp.price_per_sqft:,.2f}" if comp.price_per_sqft else "N/A"
-            lines.append(f"  {addr} {year:>5}  {sqft:>6}  {pps:>8}  ${comp.total_appraisal:>10,.0f}  {comp.similarity_score:.2f}")
+            lines.append(f"  {addr} {year:>5}  {sqft:>6}  {bed_bath:>8}  {pps:>8}  ${comp.total_appraisal:>10,.0f}  {comp.similarity_score:.2f}")
         lines.append("")
 
     # MARKET VALUE ANALYSIS - Recent comparable sales (COMPER-style, distance-based)
@@ -1157,8 +1215,8 @@ def format_text_report(result: ComparisonResult) -> str:
         lines.append("=" * 80)
         lines.append(f"RECENT COMPARABLE SALES ({len(result.comparable_sales)} nearby sales, sorted by distance)")
         lines.append("-" * 80)
-        lines.append("  Address                       Distance   Sale Date      SqFt   Sale Price  $/SqFt")
-        lines.append("  " + "-" * 84)
+        lines.append("  Address                       Distance   Sale Date   Bed/Bath   SqFt   Sale Price  $/SqFt")
+        lines.append("  " + "-" * 94)
         for comp in result.comparable_sales:
             addr = (comp.address[:28] if len(comp.address) > 28 else comp.address).ljust(28)
             if comp.distance_meters:
@@ -1170,9 +1228,13 @@ def format_text_report(result: ComparisonResult) -> str:
             else:
                 dist_str = "N/A"
             date = comp.sale_date if comp.sale_date else "N/A"
+            # Format beds/baths
+            bed_str = str(comp.beds) if comp.beds else "?"
+            bath_str = f"{comp.baths:.1f}".rstrip('0').rstrip('.') if comp.baths else "?"
+            bed_bath = f"{bed_str}/{bath_str}"
             sqft = f"{comp.finished_area:,.0f}" if comp.finished_area else "N/A"
             sale_pps = f"${comp.sale_price / comp.finished_area:,.0f}" if comp.finished_area and comp.finished_area > 0 else "N/A"
-            lines.append(f"  {addr} {dist_str:>9}   {date:>10}  {sqft:>6}  ${comp.sale_price:>10,.0f}  {sale_pps:>7}")
+            lines.append(f"  {addr} {dist_str:>9}   {date:>10}  {bed_bath:>8}  {sqft:>6}  ${comp.sale_price:>10,.0f}  {sale_pps:>7}")
         lines.append("")
 
         # Sale statistics summary
@@ -1307,13 +1369,13 @@ def analyze_single_property(client: bigquery.Client, subject: SubjectProperty,
     # Calculate statistics
     statistics = calculate_statistics(subject, comparables)
 
-    # Find comparable SALES (COMPER-style, distance-based, recent sales only, similar sqft and acreage)
+    # Find comparable SALES (COMPER-style, distance-based, 2025 sales only, similar sqft and acreage)
     comparable_sales = find_comparable_sales(
-        client, subject, args.sale_days, args.max_comps, args.sqft_range, args.acre_range, project, dataset
+        client, subject, args.max_comps, args.sqft_range, args.acre_range, project, dataset
     )
 
     if len(comparable_sales) < DEFAULT_MIN_COMPARABLES:
-        warnings.append(f"Only {len(comparable_sales)} recent sales found within {args.sale_days} days")
+        warnings.append(f"Only {len(comparable_sales)} sales found from 2025")
 
     # Calculate sale statistics
     sale_statistics = calculate_sale_statistics(subject, comparable_sales)
@@ -1403,13 +1465,6 @@ def main():
         default=DEFAULT_MAX_COMPARABLES,
         help=f"Maximum comparables to return (default: {DEFAULT_MAX_COMPARABLES})"
     )
-    parser.add_argument(
-        "--sale-days",
-        type=int,
-        default=DEFAULT_SALE_DAYS,
-        help=f"Only include sales within this many days (default: {DEFAULT_SALE_DAYS})"
-    )
-
     # Output options
     parser.add_argument(
         "--format",
