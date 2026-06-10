@@ -95,6 +95,8 @@ class ComparableProperty:
     finished_area: Optional[float]
     structure_type: Optional[str]
     exterior: Optional[str]
+    beds: Optional[int]
+    baths: Optional[float]  # Total baths including half baths as 0.5
     price_per_sqft: Optional[float]
     similarity_score: float
     year_diff: Optional[int]
@@ -451,6 +453,8 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
             finished_area=float(row.finished_area) if row.finished_area else None,
             structure_type=row.structure_type,
             exterior=row.exterior,
+            beds=int(row.beds) if row.beds else None,
+            baths=float(row.total_baths) if row.total_baths else None,
             price_per_sqft=float(row.price_per_sqft) if row.price_per_sqft else None,
             similarity_score=float(row.similarity_score) if row.similarity_score else 0,
             year_diff=int(row.year_diff) if row.year_diff else None,
@@ -510,6 +514,8 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
         b.finished_area,
         b.structure_type,
         b.exterior,
+        bb.beds,
+        COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths,
         SAFE_DIVIDE(p.TotlAppr, b.finished_area) AS price_per_sqft,
         SAFE_DIVIDE(p.SalePrice, b.finished_area) AS sale_price_per_sqft,
         SAFE_DIVIDE(p.TotlAppr, p.SalePrice) AS assessment_to_sale_ratio,
@@ -521,6 +527,8 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
     FROM `{project}.{dataset}.davidson_parcels` p
     LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b
         ON p.STANPAR = b.apn
+    LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb
+        ON p.ParID = bb.parcel_id
     WHERE
         p.ParID != @subject_parid
         AND p.LUDesc = @land_use
@@ -571,6 +579,8 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
             finished_area=float(row.finished_area) if row.finished_area else None,
             structure_type=row.structure_type,
             exterior=row.exterior,
+            beds=int(row.beds) if row.beds else None,
+            baths=float(row.total_baths) if row.total_baths else None,
             price_per_sqft=float(row.price_per_sqft) if row.price_per_sqft else None,
             similarity_score=0,  # Not used for sales-based search
             year_diff=None,
@@ -1187,14 +1197,18 @@ def format_text_report(result: ComparisonResult) -> str:
     if result.comparables:
         lines.append(f"COMPARABLE PROPERTIES ({len(result.comparables)} total)")
         lines.append("-" * 80)
-        lines.append("  Address                         Year   SqFt    $/SqFt    Appraisal    Score")
-        lines.append("  " + "-" * 76)
+        lines.append("  Address                         Year   SqFt   Bed/Bath   $/SqFt    Appraisal    Score")
+        lines.append("  " + "-" * 88)
         for comp in result.comparables:
             addr = (comp.address[:30] if len(comp.address) > 30 else comp.address).ljust(30)
             year = str(comp.year_built) if comp.year_built else "N/A"
             sqft = f"{comp.finished_area:,.0f}" if comp.finished_area else "N/A"
+            # Format beds/baths
+            bed_str = str(comp.beds) if comp.beds else "?"
+            bath_str = f"{comp.baths:.1f}".rstrip('0').rstrip('.') if comp.baths else "?"
+            bed_bath = f"{bed_str}/{bath_str}"
             pps = f"${comp.price_per_sqft:,.2f}" if comp.price_per_sqft else "N/A"
-            lines.append(f"  {addr} {year:>5}  {sqft:>6}  {pps:>8}  ${comp.total_appraisal:>10,.0f}  {comp.similarity_score:.2f}")
+            lines.append(f"  {addr} {year:>5}  {sqft:>6}  {bed_bath:>8}  {pps:>8}  ${comp.total_appraisal:>10,.0f}  {comp.similarity_score:.2f}")
         lines.append("")
 
     # MARKET VALUE ANALYSIS - Recent comparable sales (COMPER-style, distance-based)
@@ -1204,8 +1218,8 @@ def format_text_report(result: ComparisonResult) -> str:
         lines.append("=" * 80)
         lines.append(f"RECENT COMPARABLE SALES ({len(result.comparable_sales)} nearby sales, sorted by distance)")
         lines.append("-" * 80)
-        lines.append("  Address                       Distance   Sale Date      SqFt   Sale Price  $/SqFt")
-        lines.append("  " + "-" * 84)
+        lines.append("  Address                       Distance   Sale Date   Bed/Bath   SqFt   Sale Price  $/SqFt")
+        lines.append("  " + "-" * 94)
         for comp in result.comparable_sales:
             addr = (comp.address[:28] if len(comp.address) > 28 else comp.address).ljust(28)
             if comp.distance_meters:
@@ -1217,9 +1231,13 @@ def format_text_report(result: ComparisonResult) -> str:
             else:
                 dist_str = "N/A"
             date = comp.sale_date if comp.sale_date else "N/A"
+            # Format beds/baths
+            bed_str = str(comp.beds) if comp.beds else "?"
+            bath_str = f"{comp.baths:.1f}".rstrip('0').rstrip('.') if comp.baths else "?"
+            bed_bath = f"{bed_str}/{bath_str}"
             sqft = f"{comp.finished_area:,.0f}" if comp.finished_area else "N/A"
             sale_pps = f"${comp.sale_price / comp.finished_area:,.0f}" if comp.finished_area and comp.finished_area > 0 else "N/A"
-            lines.append(f"  {addr} {dist_str:>9}   {date:>10}  {sqft:>6}  ${comp.sale_price:>10,.0f}  {sale_pps:>7}")
+            lines.append(f"  {addr} {dist_str:>9}   {date:>10}  {bed_bath:>8}  {sqft:>6}  ${comp.sale_price:>10,.0f}  {sale_pps:>7}")
         lines.append("")
 
         # Sale statistics summary
