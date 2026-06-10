@@ -31,7 +31,7 @@ from typing import Optional, List
 from google.cloud import bigquery
 
 # Configuration defaults
-DEFAULT_MIN_SAVINGS = 1500
+DEFAULT_MIN_SAVINGS = 1000
 DEFAULT_YEAR_RANGE = 10
 DEFAULT_SQFT_RANGE = 20
 DEFAULT_ACREAGE_RANGE = 10
@@ -148,7 +148,12 @@ def build_leads_query(
         bb.beds IS NOT NULL AS has_bed_bath_data,
         COALESCE(fz.in_flood_zone, FALSE) AS in_flood_zone
       FROM `{project}.{dataset}.davidson_parcels` p
-      LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b ON p.STANPAR = b.apn
+      LEFT JOIN (
+        SELECT apn, ANY_VALUE(year_built) AS year_built, ANY_VALUE(finished_area) AS finished_area
+        FROM `{project}.{dataset}.davidson_building_characteristics`
+        GROUP BY apn
+        HAVING COUNT(*) = 1
+      ) b ON p.STANPAR = b.apn
       LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb ON p.ParID = bb.parcel_id
       LEFT JOIN `{project}.{dataset}.v_parcel_floodzone_enrichment` fz ON p.ParID = fz.parcel_id
       WHERE p.TotlAppr > 0
@@ -183,7 +188,12 @@ def build_leads_query(
         bb.beds,
         COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths
       FROM `{project}.{dataset}.davidson_parcels` p
-      LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b ON p.STANPAR = b.apn
+      LEFT JOIN (
+        SELECT apn, ANY_VALUE(year_built) AS year_built, ANY_VALUE(finished_area) AS finished_area
+        FROM `{project}.{dataset}.davidson_building_characteristics`
+        GROUP BY apn
+        HAVING COUNT(*) = 1
+      ) b ON p.STANPAR = b.apn
       LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb ON p.ParID = bb.parcel_id
       WHERE p.LUDesc = 'SINGLE FAMILY'
         AND p.Lat IS NOT NULL AND p.Lon IS NOT NULL
@@ -422,7 +432,12 @@ def build_debug_query(
         bb.beds,
         COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths
       FROM `{project}.{dataset}.davidson_parcels` p
-      LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b ON p.STANPAR = b.apn
+      LEFT JOIN (
+        SELECT apn, ANY_VALUE(year_built) AS year_built, ANY_VALUE(finished_area) AS finished_area
+        FROM `{project}.{dataset}.davidson_building_characteristics`
+        GROUP BY apn
+        HAVING COUNT(*) = 1
+      ) b ON p.STANPAR = b.apn
       LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb ON p.ParID = bb.parcel_id
       WHERE p.ParID = '{parid}'
     ),
@@ -437,7 +452,12 @@ def build_debug_query(
         bb.beds,
         COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths
       FROM `{project}.{dataset}.davidson_parcels` p
-      LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b ON p.STANPAR = b.apn
+      LEFT JOIN (
+        SELECT apn, ANY_VALUE(year_built) AS year_built, ANY_VALUE(finished_area) AS finished_area
+        FROM `{project}.{dataset}.davidson_building_characteristics`
+        GROUP BY apn
+        HAVING COUNT(*) = 1
+      ) b ON p.STANPAR = b.apn
       LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb ON p.ParID = bb.parcel_id
       WHERE p.LUDesc = 'SINGLE FAMILY'
         AND p.Lat IS NOT NULL AND p.Lon IS NOT NULL
@@ -515,6 +535,7 @@ def run_debug_parid(
     # Fetch subject details
     subject_query = f"""
     SELECT p.ParID, p.PropAddr, p.PropZip, p.TotlAppr, p.Acres,
+           p.SalePrice, FORMAT_DATE('%Y-%m-%d', p.OwnDate) AS last_sale_date,
            b.year_built, b.finished_area,
            bb.beds,
            COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths
@@ -534,6 +555,7 @@ def run_debug_parid(
     baths_str = f"{float(s.total_baths):.1f}" if s.total_baths else "?"
     sqft_str = f"{float(s.finished_area):,.0f}" if s.finished_area else "?"
     acres_str = f"{float(s.Acres):.2f}" if s.Acres else "?"
+    last_sale_str = f"${float(s.SalePrice):,.0f} on {s.last_sale_date}" if s.SalePrice and s.last_sale_date else "N/A"
 
     print("")
     print("=" * 80)
@@ -542,6 +564,7 @@ def run_debug_parid(
     print(f"  Subject:     {s.PropAddr}  ({s.PropZip})")
     print(f"  ParID:       {s.ParID}")
     print(f"  Assessment:  ${float(s.TotlAppr):,.0f}")
+    print(f"  Last Sale:   {last_sale_str}")
     print(f"  Year Built:  {s.year_built or '?'}")
     print(f"  Sqft:        {sqft_str}")
     print(f"  Acres:       {acres_str}")
