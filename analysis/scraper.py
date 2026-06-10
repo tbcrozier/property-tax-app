@@ -525,10 +525,10 @@ if __name__ == "__main__":
     # asyncio.run(test_one("3051", "UNION HILL RD"))
 
     # --- Single zip code ---
-    # asyncio.run(run_scraper(zip_codes=["37206"]))
+    asyncio.run(run_scraper(zip_codes=["37221"]))
 
     # --- Multiple zip codes ---
-    asyncio.run(run_scraper(zip_codes=["37205", "37215"]))
+    # asyncio.run(run_scraper(zip_codes=["37205", "37215"]))
 
     # --- Zip codes with a limit ---
     # asyncio.run(run_scraper(zip_codes=["37206"], limit=500))
