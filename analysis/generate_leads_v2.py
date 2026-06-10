@@ -80,6 +80,7 @@ class Lead:
     avg_similarity: float
     avg_comp_distance_miles: float
     in_flood_zone: bool
+    pct_over_median: float  # % the assessment exceeds comp median sale price
     match_type: str  # "exact" = strict bed/bath match, "fallback" = ±1 bed/bath used
 
 
@@ -350,6 +351,7 @@ def build_leads_query(
         s.avg_distance_miles,
         s.match_type,
         p.TotlAppr - s.median_sale_price AS over_assessment,
+        (p.TotlAppr - s.median_sale_price) / s.median_sale_price * 100 AS pct_over_median,
         (p.TotlAppr - s.median_sale_price) * {ASSESSMENT_RATIO} * {TAX_RATE} AS estimated_savings,
         LEAST(100, GREATEST(0,
           CASE
@@ -602,7 +604,9 @@ def run_debug_parid(
     print(f"  Match type:  {match_label}")
     print(f"  Comps found: {len(comps)}  |  Median sale price: ${median_sale:,.0f}")
     if over_assessment > 0:
-        print(f"  Over-assessment: ${over_assessment:,.0f}  |  Est. savings: ${est_savings:,.2f}/yr")
+        pct_over = over_assessment / median_sale * 100
+        print(f"  Over-assessment: ${over_assessment:,.0f}  ({pct_over:.1f}% above comp median)")
+        print(f"  Est. 1st-yr savings if reassessed to median: ${est_savings:,.2f}")
     else:
         print(f"  NOT over-assessed vs comp median (would not appear as lead)")
     print("")
@@ -693,6 +697,7 @@ def fetch_leads(
             current_assessment=float(row.TotlAppr),
             median_comp_sale_price=float(row.median_sale_price),
             over_assessment=float(row.over_assessment),
+            pct_over_median=float(row.pct_over_median),
             estimated_savings=float(row.estimated_savings),
             num_comparables=int(row.comps_used),
             year_built=int(row.year_built) if row.year_built else None,
@@ -721,7 +726,7 @@ def format_csv(leads: List[Lead]) -> str:
     fieldnames = [
         "parid", "address", "owner_name", "owner_address",
         "current_assessment", "median_comp_sale_price", "over_assessment",
-        "estimated_savings", "num_comparables", "confidence_score",
+        "pct_over_median", "estimated_savings", "num_comparables", "confidence_score",
         "year_built", "sqft", "acreage", "beds", "baths", "land_use",
         "avg_similarity", "avg_comp_distance_miles", "in_flood_zone", "match_type"
     ]
@@ -740,6 +745,7 @@ def format_csv(leads: List[Lead]) -> str:
             "current_assessment": f"{lead.current_assessment:.0f}",
             "median_comp_sale_price": f"{lead.median_comp_sale_price:.0f}",
             "over_assessment": f"{lead.over_assessment:.0f}",
+            "pct_over_median": f"{lead.pct_over_median:.1f}",
             "estimated_savings": f"{lead.estimated_savings:.2f}",
             "num_comparables": lead.num_comparables,
             "confidence_score": f"{lead.confidence_score:.0f}",
