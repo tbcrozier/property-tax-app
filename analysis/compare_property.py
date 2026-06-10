@@ -27,7 +27,6 @@ DEFAULT_SQFT_RANGE_PCT = 25
 DEFAULT_ACRE_RANGE_PCT = 50  # Wider range for acreage since land sizes vary more
 DEFAULT_MIN_COMPARABLES = 5
 DEFAULT_MAX_COMPARABLES = 20
-DEFAULT_SALE_DAYS = 730  # 2 years
 DEFAULT_BQ_PROJECT = "public-data-dev"
 DEFAULT_BQ_DATASET = "property_tax"
 
@@ -470,13 +469,12 @@ def find_comparables(client: bigquery.Client, subject: SubjectProperty,
 
 
 def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
-                          sale_days: int, max_comps: int,
-                          sqft_range_pct: int, acre_range_pct: int,
+                          max_comps: int, sqft_range_pct: int, acre_range_pct: int,
                           project: str, dataset: str) -> List[ComparableProperty]:
-    """Find comparable properties with recent sales, sorted by distance.
+    """Find comparable properties with 2025 sales, sorted by distance.
 
     This is the COMPER-style search that prioritizes:
-    1. Recent sales (within sale_days)
+    1. Sales from 2025
     2. Geographic proximity (distance from subject)
     3. Same land use type
     4. Similar square footage (+/- sqft_range_pct)
@@ -533,7 +531,7 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
         p.ParID != @subject_parid
         AND p.LUDesc = @land_use
         AND p.SalePrice >= 10000  -- Filter nominal transfers
-        AND p.OwnDate >= DATE_SUB(CURRENT_DATE(), INTERVAL @sale_days DAY)
+        AND EXTRACT(YEAR FROM p.OwnDate) = 2025
         AND p.Lat IS NOT NULL
         AND p.Lon IS NOT NULL
         AND (
@@ -556,7 +554,6 @@ def find_comparable_sales(client: bigquery.Client, subject: SubjectProperty,
             bigquery.ScalarQueryParameter("land_use", "STRING", subject.land_use),
             bigquery.ScalarQueryParameter("subject_lat", "FLOAT64", subject.latitude or 0),
             bigquery.ScalarQueryParameter("subject_lon", "FLOAT64", subject.longitude or 0),
-            bigquery.ScalarQueryParameter("sale_days", "INT64", sale_days),
             bigquery.ScalarQueryParameter("max_comps", "INT64", max_comps),
             bigquery.ScalarQueryParameter("sqft_min", "FLOAT64", sqft_min),
             bigquery.ScalarQueryParameter("sqft_max", "FLOAT64", sqft_max),
@@ -1372,13 +1369,13 @@ def analyze_single_property(client: bigquery.Client, subject: SubjectProperty,
     # Calculate statistics
     statistics = calculate_statistics(subject, comparables)
 
-    # Find comparable SALES (COMPER-style, distance-based, recent sales only, similar sqft and acreage)
+    # Find comparable SALES (COMPER-style, distance-based, 2025 sales only, similar sqft and acreage)
     comparable_sales = find_comparable_sales(
-        client, subject, args.sale_days, args.max_comps, args.sqft_range, args.acre_range, project, dataset
+        client, subject, args.max_comps, args.sqft_range, args.acre_range, project, dataset
     )
 
     if len(comparable_sales) < DEFAULT_MIN_COMPARABLES:
-        warnings.append(f"Only {len(comparable_sales)} recent sales found within {args.sale_days} days")
+        warnings.append(f"Only {len(comparable_sales)} sales found from 2025")
 
     # Calculate sale statistics
     sale_statistics = calculate_sale_statistics(subject, comparable_sales)
@@ -1468,13 +1465,6 @@ def main():
         default=DEFAULT_MAX_COMPARABLES,
         help=f"Maximum comparables to return (default: {DEFAULT_MAX_COMPARABLES})"
     )
-    parser.add_argument(
-        "--sale-days",
-        type=int,
-        default=DEFAULT_SALE_DAYS,
-        help=f"Only include sales within this many days (default: {DEFAULT_SALE_DAYS})"
-    )
-
     # Output options
     parser.add_argument(
         "--format",

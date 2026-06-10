@@ -33,7 +33,7 @@ DEFAULT_ACREAGE_RANGE = 10
 DEFAULT_MAX_DISTANCE = 2.0  # miles
 DEFAULT_BED_RANGE = 0  # exact match by default
 DEFAULT_BATH_RANGE = 0  # exact match by default
-DEFAULT_MIN_COMPARABLES = 3  # lowered since we now use quality-based confidence
+DEFAULT_MIN_COMPARABLES = 5  # require solid comp count for confidence
 DEFAULT_EXCLUDE_RECENT_SALES = 730  # 2 years in days
 DEFAULT_BQ_PROJECT = "public-data-dev"
 DEFAULT_BQ_DATASET = "property_tax"
@@ -140,14 +140,13 @@ def build_leads_query(
         -- Exclude recent sales (last N days)
         AND (p.OwnDate IS NULL OR p.OwnDate < DATE_SUB(CURRENT_DATE(), INTERVAL {exclude_recent_sales_days} DAY))
         -- Exclude properties where a valid recent sale validates the assessment
-        -- Valid sale = >= $10k, in market window 2020-01-01 to 2025-01-01
-        -- If assessment is within 10% of sale price, the sale proves the assessment is reasonable
+        -- Valid sale = >= $10k, from 2020 onwards (including 2025)
+        -- If assessment is within 15% of sale price, the sale proves the assessment is reasonable
         AND (
           p.SalePrice IS NULL
           OR p.SalePrice < 10000
           OR p.OwnDate < '2020-01-01'
-          OR p.OwnDate >= '2025-01-01'
-          OR p.TotlAppr > p.SalePrice * 1.10  -- Only keep if assessed > 110% of sale (genuine over-assessment)
+          OR p.TotlAppr > p.SalePrice * 1.15  -- Only keep if assessed > 115% of sale (genuine over-assessment)
         )
     ),
     comparables AS (
