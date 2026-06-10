@@ -49,6 +49,13 @@ DEFAULT_BQ_DATASET = "property_tax"
 TAX_RATE = 0.03254
 ASSESSMENT_RATIO = 0.25
 
+# Tight thresholds for the exact (first) pass before falling back to configured values
+EXACT_SQFT_RANGE = 15       # ±15% sqft  (fallback: --sqft-range, default 20%)
+EXACT_YEAR_RANGE = 7        # ±7 years   (fallback: --year-range, default 10)
+EXACT_MAX_DISTANCE = 2.0    # 2.0 miles  (fallback: --max-distance, default 3.0)
+EXACT_ACREAGE_RANGE = 10    # ±10% acres (same as fallback default)
+# Beds/baths: always exact=0 in the first pass; fallback uses --bed-range / --bath-range
+
 
 @dataclass
 class Lead:
@@ -73,6 +80,7 @@ class Lead:
     avg_similarity: float
     avg_comp_distance_miles: float
     in_flood_zone: bool
+    match_type: str  # "exact" = strict bed/bath match, "fallback" = ±1 bed/bath used
 
 
 def build_leads_query(
@@ -100,12 +108,19 @@ def build_leads_query(
     zipcode_filter = f"AND p.PropZip = '{zipcode}'" if zipcode else ""
     bed_bath_filter = "AND bb.beds IS NOT NULL" if require_bed_bath else ""
 
+    # Fallback (loose) pass factors — controlled by CLI params
     sqft_min_factor = 1 - (sqft_range / 100)
     sqft_max_factor = 1 + (sqft_range / 100)
     acreage_min_factor = 1 - (acreage_range / 100)
     acreage_max_factor = 1 + (acreage_range / 100)
     max_distance_meters = max_distance * 1609.34
     comp_year_end_exclusive = comp_year_end + 1
+    # Exact (tight) pass factors — from EXACT_* constants
+    exact_sqft_min_factor = 1 - (EXACT_SQFT_RANGE / 100)
+    exact_sqft_max_factor = 1 + (EXACT_SQFT_RANGE / 100)
+    exact_acreage_min_factor = 1 - (EXACT_ACREAGE_RANGE / 100)
+    exact_acreage_max_factor = 1 + (EXACT_ACREAGE_RANGE / 100)
+    exact_max_distance_meters = EXACT_MAX_DISTANCE * 1609.34
 
     query = f"""
     WITH enriched_parcels AS (
@@ -177,16 +192,53 @@ def build_leads_query(
         AND p.OwnDate < '{comp_year_end_exclusive}-01-01'
         AND p.SalePrice >= {min_comp_sale_price}
     ),
-    comparables AS (
-      -- Match each subject property against similar recently sold comps
+    exact_comps AS (
+      -- Pass 1: strict exact match on beds and baths
       SELECT
         p.ParID,
         c.ParID AS comp_parid,
         c.sale_price AS comp_sale_price,
         p.has_bed_bath_data,
         ST_DISTANCE(ST_GEOGPOINT(p.Lon, p.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / 1609.34 AS distance_miles,
-        -- Similarity score (lower = more similar)
-        -- Weighted: sqft 25%, year 20%, acreage 15%, distance 20%, beds 10%, baths 10%
+        ABS(p.year_built - c.year_built) / {year_range} * 0.20 +
+        ABS(p.finished_area - c.finished_area) / NULLIF(p.finished_area, 0) * 0.25 +
+        CASE
+          WHEN p.Acres IS NULL OR p.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0 THEN 0
+          ELSE ABS(p.Acres - c.Acres) / NULLIF(p.Acres, 0) * 0.15
+        END +
+        ST_DISTANCE(ST_GEOGPOINT(p.Lon, p.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / {max_distance_meters} * 0.20 +
+        CASE
+          WHEN p.beds IS NULL OR c.beds IS NULL THEN 0.05
+          ELSE ABS(p.beds - c.beds) / GREATEST(p.beds, 1) * 0.10
+        END +
+        CASE
+          WHEN p.total_baths IS NULL OR c.total_baths IS NULL THEN 0.05
+          ELSE ABS(p.total_baths - c.total_baths) / GREATEST(p.total_baths, 1) * 0.10
+        END
+        AS similarity_score
+      FROM enriched_parcels p
+      JOIN recent_sales c ON
+        p.LUDesc = c.LUDesc
+        AND p.ParID != c.ParID
+        AND ST_DISTANCE(ST_GEOGPOINT(p.Lon, p.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) <= {exact_max_distance_meters}
+        AND c.finished_area BETWEEN p.finished_area * {exact_sqft_min_factor} AND p.finished_area * {exact_sqft_max_factor}
+        AND c.year_built BETWEEN p.year_built - {EXACT_YEAR_RANGE} AND p.year_built + {EXACT_YEAR_RANGE}
+        AND (
+          p.Acres IS NULL OR p.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0
+          OR c.Acres BETWEEN p.Acres * {exact_acreage_min_factor} AND p.Acres * {exact_acreage_max_factor}
+        )
+        AND (p.beds IS NULL OR c.beds IS NULL OR c.beds = p.beds)
+        AND (p.total_baths IS NULL OR c.total_baths IS NULL OR c.total_baths = p.total_baths)
+    ),
+    fallback_comps AS (
+      -- Pass 2: relaxed ±bed_range/bath_range, used only when exact finds < min_comparables
+      -- Includes exact-match comps so the full set is available when falling back
+      SELECT
+        p.ParID,
+        c.ParID AS comp_parid,
+        c.sale_price AS comp_sale_price,
+        p.has_bed_bath_data,
+        ST_DISTANCE(ST_GEOGPOINT(p.Lon, p.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / 1609.34 AS distance_miles,
         ABS(p.year_built - c.year_built) / {year_range} * 0.20 +
         ABS(p.finished_area - c.finished_area) / NULLIF(p.finished_area, 0) * 0.25 +
         CASE
@@ -223,11 +275,28 @@ def build_leads_query(
           OR c.total_baths BETWEEN p.total_baths - {bath_range} AND p.total_baths + {bath_range}
         )
     ),
+    exact_counts AS (
+      SELECT ParID, COUNT(*) AS n FROM exact_comps GROUP BY ParID
+    ),
+    combined_comps AS (
+      -- Use exact comps for properties that found enough; fall back to ±1 for the rest
+      SELECT ec.*, 'exact' AS match_type
+      FROM exact_comps ec
+      JOIN exact_counts cn USING (ParID)
+      WHERE cn.n >= {min_comparables}
+
+      UNION ALL
+
+      SELECT fc.*, 'fallback' AS match_type
+      FROM fallback_comps fc
+      LEFT JOIN exact_counts cn ON fc.ParID = cn.ParID
+      WHERE COALESCE(cn.n, 0) < {min_comparables}
+    ),
     ranked_comps AS (
       SELECT *,
         ROW_NUMBER() OVER (PARTITION BY ParID ORDER BY similarity_score) AS rank,
         COUNT(*) OVER (PARTITION BY ParID) AS total_comps
-      FROM comparables
+      FROM combined_comps
     ),
     top_comps AS (
       SELECT * FROM ranked_comps WHERE rank <= 20
@@ -240,7 +309,8 @@ def build_leads_query(
         AVG(similarity_score) AS avg_similarity,
         AVG(distance_miles) AS avg_distance_miles,
         APPROX_QUANTILES(comp_sale_price, 100)[OFFSET(50)] AS median_sale_price,
-        LOGICAL_OR(has_bed_bath_data) AS has_bed_bath_data
+        LOGICAL_OR(has_bed_bath_data) AS has_bed_bath_data,
+        ANY_VALUE(match_type) AS match_type
       FROM top_comps
       GROUP BY ParID, total_comps
     ),
@@ -268,6 +338,7 @@ def build_leads_query(
         s.total_comps,
         s.avg_similarity,
         s.avg_distance_miles,
+        s.match_type,
         p.TotlAppr - s.median_sale_price AS over_assessment,
         (p.TotlAppr - s.median_sale_price) * {ASSESSMENT_RATIO} * {TAX_RATE} AS estimated_savings,
         LEAST(100, GREATEST(0,
@@ -306,6 +377,7 @@ def build_debug_query(
     comp_year_start: int,
     comp_year_end: int,
     min_comp_sale_price: float,
+    min_comparables: int,
     sqft_range: int,
     year_range: int,
     acreage_range: int,
@@ -313,7 +385,8 @@ def build_debug_query(
     bed_range: int,
     bath_range: int,
 ) -> str:
-    """Build a query that returns the exact comps used for a single property."""
+    """Build a two-pass query that returns the exact comps used for a single property,
+    with match_type indicating whether exact or fallback criteria were applied."""
 
     sqft_min_factor = 1 - (sqft_range / 100)
     sqft_max_factor = 1 + (sqft_range / 100)
@@ -321,6 +394,24 @@ def build_debug_query(
     acreage_max_factor = 1 + (acreage_range / 100)
     max_distance_meters = max_distance * 1609.34
     comp_year_end_exclusive = comp_year_end + 1
+    exact_sqft_min_factor = 1 - (EXACT_SQFT_RANGE / 100)
+    exact_sqft_max_factor = 1 + (EXACT_SQFT_RANGE / 100)
+    exact_acreage_min_factor = 1 - (EXACT_ACREAGE_RANGE / 100)
+    exact_acreage_max_factor = 1 + (EXACT_ACREAGE_RANGE / 100)
+    exact_max_distance_meters = EXACT_MAX_DISTANCE * 1609.34
+
+    sim_score = f"""
+      ABS(s.year_built - c.year_built) / {year_range} * 0.20 +
+      ABS(s.finished_area - c.finished_area) / NULLIF(s.finished_area, 0) * 0.25 +
+      CASE
+        WHEN s.Acres IS NULL OR s.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0 THEN 0
+        ELSE ABS(s.Acres - c.Acres) / NULLIF(s.Acres, 0) * 0.15
+      END +
+      ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / {max_distance_meters} * 0.20 +
+      CASE WHEN s.beds IS NULL OR c.beds IS NULL THEN 0.05
+           ELSE ABS(s.beds - c.beds) / GREATEST(s.beds, 1) * 0.10 END +
+      CASE WHEN s.total_baths IS NULL OR c.total_baths IS NULL THEN 0.05
+           ELSE ABS(s.total_baths - c.total_baths) / GREATEST(s.total_baths, 1) * 0.10 END"""
 
     return f"""
     WITH subject AS (
@@ -354,50 +445,52 @@ def build_debug_query(
         AND p.OwnDate >= '{comp_year_start}-01-01'
         AND p.OwnDate < '{comp_year_end_exclusive}-01-01'
         AND p.SalePrice >= {min_comp_sale_price}
+    ),
+    exact_candidates AS (
+      SELECT c.ParID AS comp_parid, c.PropAddr AS comp_address, c.comp_assessment,
+             c.sale_price, c.sale_date, c.year_built AS comp_year_built,
+             c.finished_area AS comp_sqft, c.beds AS comp_beds, c.total_baths AS comp_baths,
+             c.Acres AS comp_acres,
+             ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / 1609.34 AS distance_miles,
+             {sim_score} AS similarity_score
+      FROM subject s JOIN recent_sales c ON
+        s.LUDesc = c.LUDesc AND s.ParID != c.ParID
+        AND ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) <= {exact_max_distance_meters}
+        AND c.finished_area BETWEEN s.finished_area * {exact_sqft_min_factor} AND s.finished_area * {exact_sqft_max_factor}
+        AND c.year_built BETWEEN s.year_built - {EXACT_YEAR_RANGE} AND s.year_built + {EXACT_YEAR_RANGE}
+        AND (s.Acres IS NULL OR s.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0
+             OR c.Acres BETWEEN s.Acres * {exact_acreage_min_factor} AND s.Acres * {exact_acreage_max_factor})
+        AND (s.beds IS NULL OR c.beds IS NULL OR c.beds = s.beds)
+        AND (s.total_baths IS NULL OR c.total_baths IS NULL OR c.total_baths = s.total_baths)
+    ),
+    fallback_candidates AS (
+      SELECT c.ParID AS comp_parid, c.PropAddr AS comp_address, c.comp_assessment,
+             c.sale_price, c.sale_date, c.year_built AS comp_year_built,
+             c.finished_area AS comp_sqft, c.beds AS comp_beds, c.total_baths AS comp_baths,
+             c.Acres AS comp_acres,
+             ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / 1609.34 AS distance_miles,
+             {sim_score} AS similarity_score
+      FROM subject s JOIN recent_sales c ON
+        s.LUDesc = c.LUDesc AND s.ParID != c.ParID
+        AND ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) <= {max_distance_meters}
+        AND c.finished_area BETWEEN s.finished_area * {sqft_min_factor} AND s.finished_area * {sqft_max_factor}
+        AND c.year_built BETWEEN s.year_built - {year_range} AND s.year_built + {year_range}
+        AND (s.Acres IS NULL OR s.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0
+             OR c.Acres BETWEEN s.Acres * {acreage_min_factor} AND s.Acres * {acreage_max_factor})
+        AND (s.beds IS NULL OR c.beds IS NULL
+             OR c.beds BETWEEN s.beds - {bed_range} AND s.beds + {bed_range})
+        AND (s.total_baths IS NULL OR c.total_baths IS NULL
+             OR c.total_baths BETWEEN s.total_baths - {bath_range} AND s.total_baths + {bath_range})
+    ),
+    exact_count AS (SELECT COUNT(*) AS n FROM exact_candidates),
+    combined AS (
+      SELECT ec.*, 'exact' AS match_type FROM exact_candidates ec
+      CROSS JOIN exact_count cn WHERE cn.n >= {min_comparables}
+      UNION ALL
+      SELECT fc.*, 'fallback' AS match_type FROM fallback_candidates fc
+      CROSS JOIN exact_count cn WHERE cn.n < {min_comparables}
     )
-    SELECT
-      c.ParID            AS comp_parid,
-      c.PropAddr         AS comp_address,
-      c.comp_assessment,
-      c.sale_price,
-      c.sale_date,
-      c.year_built       AS comp_year_built,
-      c.finished_area    AS comp_sqft,
-      c.beds             AS comp_beds,
-      c.total_baths      AS comp_baths,
-      c.Acres            AS comp_acres,
-      ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / 1609.34 AS distance_miles,
-      ABS(s.year_built - c.year_built) / {year_range} * 0.20 +
-      ABS(s.finished_area - c.finished_area) / NULLIF(s.finished_area, 0) * 0.25 +
-      CASE
-        WHEN s.Acres IS NULL OR s.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0 THEN 0
-        ELSE ABS(s.Acres - c.Acres) / NULLIF(s.Acres, 0) * 0.15
-      END +
-      ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / {max_distance_meters} * 0.20 +
-      CASE
-        WHEN s.beds IS NULL OR c.beds IS NULL THEN 0.05
-        ELSE ABS(s.beds - c.beds) / GREATEST(s.beds, 1) * 0.10
-      END +
-      CASE
-        WHEN s.total_baths IS NULL OR c.total_baths IS NULL THEN 0.05
-        ELSE ABS(s.total_baths - c.total_baths) / GREATEST(s.total_baths, 1) * 0.10
-      END
-      AS similarity_score
-    FROM subject s
-    JOIN recent_sales c ON
-      s.LUDesc = c.LUDesc
-      AND s.ParID != c.ParID
-      AND ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) <= {max_distance_meters}
-      AND c.finished_area BETWEEN s.finished_area * {sqft_min_factor} AND s.finished_area * {sqft_max_factor}
-      AND c.year_built BETWEEN s.year_built - {year_range} AND s.year_built + {year_range}
-      AND (
-        s.Acres IS NULL OR s.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0
-        OR c.Acres BETWEEN s.Acres * {acreage_min_factor} AND s.Acres * {acreage_max_factor}
-      )
-      AND (s.beds IS NULL OR c.beds IS NULL OR c.beds BETWEEN s.beds - {bed_range} AND s.beds + {bed_range})
-      AND (s.total_baths IS NULL OR c.total_baths IS NULL OR c.total_baths BETWEEN s.total_baths - {bath_range} AND s.total_baths + {bath_range})
-    ORDER BY similarity_score ASC
-    LIMIT 20
+    SELECT * FROM combined ORDER BY similarity_score ASC LIMIT 20
     """
 
 
@@ -409,6 +502,7 @@ def run_debug_parid(
     comp_year_start: int,
     comp_year_end: int,
     min_comp_sale_price: float,
+    min_comparables: int,
     sqft_range: int,
     year_range: int,
     acreage_range: int,
@@ -442,9 +536,9 @@ def run_debug_parid(
     acres_str = f"{float(s.Acres):.2f}" if s.Acres else "?"
 
     print("")
-    print("=" * 75)
+    print("=" * 80)
     print("  COMPARABLE DEBUG — generate_leads_v2")
-    print("=" * 75)
+    print("=" * 80)
     print(f"  Subject:     {s.PropAddr}  ({s.PropZip})")
     print(f"  ParID:       {s.ParID}")
     print(f"  Assessment:  ${float(s.TotlAppr):,.0f}")
@@ -452,15 +546,17 @@ def run_debug_parid(
     print(f"  Sqft:        {sqft_str}")
     print(f"  Acres:       {acres_str}")
     print(f"  Beds/Baths:  {beds_str} bd / {baths_str} ba")
-    print(f"  Comp years:  {comp_year_start}–{comp_year_end}  |  Min sale: ${min_comp_sale_price:,.0f}")
-    print(f"  Filters:     sqft ±{sqft_range}%  |  year ±{year_range}  |  dist ≤{max_distance} mi")
-    print("=" * 75)
+    print(f"  Comp years:  {comp_year_start}–{comp_year_end}  |  Min sale: ${min_comp_sale_price:,.0f}  |  Min comps: {min_comparables}")
+    print(f"  Exact pass:  sqft ±{EXACT_SQFT_RANGE}%  |  year ±{EXACT_YEAR_RANGE}  |  dist ≤{EXACT_MAX_DISTANCE} mi  |  beds exact  |  baths exact")
+    print(f"  Fallback:    sqft ±{sqft_range}%  |  year ±{year_range}  |  dist ≤{max_distance} mi  |  beds ±{bed_range}  |  baths ±{bath_range}")
+    print("=" * 80)
 
     # Fetch comps
     debug_query = build_debug_query(
         parid=parid, project=project, dataset=dataset,
         comp_year_start=comp_year_start, comp_year_end=comp_year_end,
         min_comp_sale_price=min_comp_sale_price,
+        min_comparables=min_comparables,
         sqft_range=sqft_range, year_range=year_range,
         acreage_range=acreage_range, max_distance=max_distance,
         bed_range=bed_range, bath_range=bath_range,
@@ -469,22 +565,26 @@ def run_debug_parid(
 
     if not comps:
         print("  No comps found — this property would not appear as a lead.")
-        print("=" * 75)
+        print("=" * 80)
         return
+
+    match_type = comps[0].match_type if comps else "unknown"
+    match_label = "EXACT (strict criteria met min comps)" if match_type == "exact" else f"FALLBACK (exact pass had < {min_comparables} comps; loose criteria used)"
 
     sale_prices = [float(c.sale_price) for c in comps]
     median_sale = sorted(sale_prices)[len(sale_prices) // 2]
     over_assessment = float(s.TotlAppr) - median_sale
     est_savings = over_assessment * ASSESSMENT_RATIO * TAX_RATE
 
+    print(f"  Match type:  {match_label}")
     print(f"  Comps found: {len(comps)}  |  Median sale price: ${median_sale:,.0f}")
     if over_assessment > 0:
         print(f"  Over-assessment: ${over_assessment:,.0f}  |  Est. savings: ${est_savings:,.2f}/yr")
     else:
         print(f"  NOT over-assessed vs comp median (would not appear as lead)")
     print("")
-    print(f"  {'#':<3} {'Address':<32} {'Assessment':>11}  {'Sale Price':>11}  {'Sale Date':<12} {'Sqft':>6}  {'Year':>5}  {'Bd/Ba':<6}  {'Dist':>6}  {'Sim':>6}")
-    print("  " + "-" * 113)
+    print(f"  {'#':<3} {'Address':<32} {'Assessment':>11}  {'Sale Price':>11}  {'Sale Date':<12} {'Sqft':>6}  {'Year':>5}  {'Bd/Ba':<6}  {'Dist':>8}  {'Sim':>6}  {'Match':<8}")
+    print("  " + "-" * 122)
     for i, c in enumerate(comps, 1):
         addr = (c.comp_address[:30] if c.comp_address and len(c.comp_address) > 30 else (c.comp_address or "")).ljust(30)
         sqft = f"{float(c.comp_sqft):,.0f}" if c.comp_sqft else "N/A"
@@ -495,8 +595,9 @@ def run_debug_parid(
         sim = f"{float(c.similarity_score):.3f}"
         date = c.sale_date or "N/A"
         assessment = f"${float(c.comp_assessment):>10,.0f}" if c.comp_assessment else "        N/A"
-        print(f"  {i:<3} {addr}  {assessment}  ${float(c.sale_price):>10,.0f}  {date:<12} {sqft:>6}  {c.comp_year_built or '?':>5}  {bed_bath:<6}  {dist:>8}  {sim:>6}")
-    print("=" * 75)
+        row_match = c.match_type or "?"
+        print(f"  {i:<3} {addr}  {assessment}  ${float(c.sale_price):>10,.0f}  {date:<12} {sqft:>6}  {c.comp_year_built or '?':>5}  {bed_bath:<6}  {dist:>8}  {sim:>6}  {row_match:<8}")
+    print("=" * 80)
     print("")
 
 
@@ -582,6 +683,7 @@ def fetch_leads(
             avg_similarity=float(row.avg_similarity),
             avg_comp_distance_miles=float(row.avg_distance_miles),
             in_flood_zone=bool(row.in_flood_zone),
+            match_type=str(row.match_type),
         )
         leads.append(lead)
 
@@ -598,7 +700,7 @@ def format_csv(leads: List[Lead]) -> str:
         "current_assessment", "median_comp_sale_price", "over_assessment",
         "estimated_savings", "num_comparables", "confidence_score",
         "year_built", "sqft", "acreage", "beds", "baths", "land_use",
-        "avg_similarity", "avg_comp_distance_miles", "in_flood_zone"
+        "avg_similarity", "avg_comp_distance_miles", "in_flood_zone", "match_type"
     ]
 
     import io
@@ -627,6 +729,7 @@ def format_csv(leads: List[Lead]) -> str:
             "avg_similarity": f"{lead.avg_similarity:.3f}",
             "avg_comp_distance_miles": f"{lead.avg_comp_distance_miles:.2f}",
             "in_flood_zone": "Yes" if lead.in_flood_zone else "No",
+            "match_type": lead.match_type,
         }
         writer.writerow(row)
 
@@ -755,13 +858,13 @@ Examples:
         "--bed-range",
         type=int,
         default=DEFAULT_BED_RANGE,
-        help=f"Bedroom range +/- for comparables (default: {DEFAULT_BED_RANGE} = exact match)"
+        help=f"Bedroom fallback range +/- when exact match finds < min-comparables (default: {DEFAULT_BED_RANGE})"
     )
     parser.add_argument(
         "--bath-range",
         type=int,
         default=DEFAULT_BATH_RANGE,
-        help=f"Bathroom range +/- for comparables (default: {DEFAULT_BATH_RANGE} = exact match)"
+        help=f"Bathroom fallback range +/- when exact match finds < min-comparables (default: {DEFAULT_BATH_RANGE})"
     )
     parser.add_argument(
         "--min-comparables",
@@ -870,6 +973,7 @@ Examples:
             comp_year_start=args.comp_year_start,
             comp_year_end=args.comp_year_end,
             min_comp_sale_price=args.min_comp_sale_price,
+            min_comparables=args.min_comparables,
             sqft_range=args.sqft_range,
             year_range=args.year_range,
             acreage_range=args.acreage_range,
