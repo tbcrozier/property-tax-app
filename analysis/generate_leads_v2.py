@@ -299,6 +299,207 @@ def build_leads_query(
     return query
 
 
+def build_debug_query(
+    parid: str,
+    project: str,
+    dataset: str,
+    comp_year_start: int,
+    comp_year_end: int,
+    min_comp_sale_price: float,
+    sqft_range: int,
+    year_range: int,
+    acreage_range: int,
+    max_distance: float,
+    bed_range: int,
+    bath_range: int,
+) -> str:
+    """Build a query that returns the exact comps used for a single property."""
+
+    sqft_min_factor = 1 - (sqft_range / 100)
+    sqft_max_factor = 1 + (sqft_range / 100)
+    acreage_min_factor = 1 - (acreage_range / 100)
+    acreage_max_factor = 1 + (acreage_range / 100)
+    max_distance_meters = max_distance * 1609.34
+    comp_year_end_exclusive = comp_year_end + 1
+
+    return f"""
+    WITH subject AS (
+      SELECT
+        p.ParID, p.PropAddr, p.PropZip, p.LUDesc, p.TotlAppr,
+        p.Lat, p.Lon, p.Acres,
+        b.year_built, b.finished_area,
+        bb.beds,
+        COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths
+      FROM `{project}.{dataset}.davidson_parcels` p
+      LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b ON p.STANPAR = b.apn
+      LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb ON p.ParID = bb.parcel_id
+      WHERE p.ParID = '{parid}'
+    ),
+    recent_sales AS (
+      SELECT
+        p.ParID, p.PropAddr, p.LUDesc,
+        p.TotlAppr AS comp_assessment,
+        p.SalePrice AS sale_price,
+        FORMAT_DATE('%Y-%m-%d', p.OwnDate) AS sale_date,
+        p.Lat, p.Lon, p.Acres,
+        b.year_built, b.finished_area,
+        bb.beds,
+        COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths
+      FROM `{project}.{dataset}.davidson_parcels` p
+      LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b ON p.STANPAR = b.apn
+      LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb ON p.ParID = bb.parcel_id
+      WHERE p.LUDesc = 'SINGLE FAMILY'
+        AND p.Lat IS NOT NULL AND p.Lon IS NOT NULL
+        AND b.year_built IS NOT NULL AND b.finished_area IS NOT NULL
+        AND p.OwnDate >= '{comp_year_start}-01-01'
+        AND p.OwnDate < '{comp_year_end_exclusive}-01-01'
+        AND p.SalePrice >= {min_comp_sale_price}
+    )
+    SELECT
+      c.ParID            AS comp_parid,
+      c.PropAddr         AS comp_address,
+      c.comp_assessment,
+      c.sale_price,
+      c.sale_date,
+      c.year_built       AS comp_year_built,
+      c.finished_area    AS comp_sqft,
+      c.beds             AS comp_beds,
+      c.total_baths      AS comp_baths,
+      c.Acres            AS comp_acres,
+      ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / 1609.34 AS distance_miles,
+      ABS(s.year_built - c.year_built) / {year_range} * 0.20 +
+      ABS(s.finished_area - c.finished_area) / NULLIF(s.finished_area, 0) * 0.25 +
+      CASE
+        WHEN s.Acres IS NULL OR s.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0 THEN 0
+        ELSE ABS(s.Acres - c.Acres) / NULLIF(s.Acres, 0) * 0.15
+      END +
+      ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) / {max_distance_meters} * 0.20 +
+      CASE
+        WHEN s.beds IS NULL OR c.beds IS NULL THEN 0.05
+        ELSE ABS(s.beds - c.beds) / GREATEST(s.beds, 1) * 0.10
+      END +
+      CASE
+        WHEN s.total_baths IS NULL OR c.total_baths IS NULL THEN 0.05
+        ELSE ABS(s.total_baths - c.total_baths) / GREATEST(s.total_baths, 1) * 0.10
+      END
+      AS similarity_score
+    FROM subject s
+    JOIN recent_sales c ON
+      s.LUDesc = c.LUDesc
+      AND s.ParID != c.ParID
+      AND ST_DISTANCE(ST_GEOGPOINT(s.Lon, s.Lat), ST_GEOGPOINT(c.Lon, c.Lat)) <= {max_distance_meters}
+      AND c.finished_area BETWEEN s.finished_area * {sqft_min_factor} AND s.finished_area * {sqft_max_factor}
+      AND c.year_built BETWEEN s.year_built - {year_range} AND s.year_built + {year_range}
+      AND (
+        s.Acres IS NULL OR s.Acres = 0 OR c.Acres IS NULL OR c.Acres = 0
+        OR c.Acres BETWEEN s.Acres * {acreage_min_factor} AND s.Acres * {acreage_max_factor}
+      )
+      AND (s.beds IS NULL OR c.beds IS NULL OR c.beds BETWEEN s.beds - {bed_range} AND s.beds + {bed_range})
+      AND (s.total_baths IS NULL OR c.total_baths IS NULL OR c.total_baths BETWEEN s.total_baths - {bath_range} AND s.total_baths + {bath_range})
+    ORDER BY similarity_score ASC
+    LIMIT 20
+    """
+
+
+def run_debug_parid(
+    client: bigquery.Client,
+    parid: str,
+    project: str,
+    dataset: str,
+    comp_year_start: int,
+    comp_year_end: int,
+    min_comp_sale_price: float,
+    sqft_range: int,
+    year_range: int,
+    acreage_range: int,
+    max_distance: float,
+    bed_range: int,
+    bath_range: int,
+):
+    """Print the exact comps used for a single property in generate_leads_v2."""
+
+    # Fetch subject details
+    subject_query = f"""
+    SELECT p.ParID, p.PropAddr, p.PropZip, p.TotlAppr, p.Acres,
+           b.year_built, b.finished_area,
+           bb.beds,
+           COALESCE(bb.baths, 0) + COALESCE(bb.half_baths, 0) * 0.5 AS total_baths
+    FROM `{project}.{dataset}.davidson_parcels` p
+    LEFT JOIN `{project}.{dataset}.davidson_building_characteristics` b ON p.STANPAR = b.apn
+    LEFT JOIN `{project}.{dataset}.davidson_bed_bath` bb ON p.ParID = bb.parcel_id
+    WHERE p.ParID = '{parid}'
+    LIMIT 1
+    """
+    subject_rows = list(client.query(subject_query).result())
+    if not subject_rows:
+        print(f"No property found with ParID {parid}", file=sys.stderr)
+        return
+    s = subject_rows[0]
+
+    beds_str = str(int(s.beds)) if s.beds else "?"
+    baths_str = f"{float(s.total_baths):.1f}" if s.total_baths else "?"
+    sqft_str = f"{float(s.finished_area):,.0f}" if s.finished_area else "?"
+    acres_str = f"{float(s.Acres):.2f}" if s.Acres else "?"
+
+    print("")
+    print("=" * 75)
+    print("  COMPARABLE DEBUG — generate_leads_v2")
+    print("=" * 75)
+    print(f"  Subject:     {s.PropAddr}  ({s.PropZip})")
+    print(f"  ParID:       {s.ParID}")
+    print(f"  Assessment:  ${float(s.TotlAppr):,.0f}")
+    print(f"  Year Built:  {s.year_built or '?'}")
+    print(f"  Sqft:        {sqft_str}")
+    print(f"  Acres:       {acres_str}")
+    print(f"  Beds/Baths:  {beds_str} bd / {baths_str} ba")
+    print(f"  Comp years:  {comp_year_start}–{comp_year_end}  |  Min sale: ${min_comp_sale_price:,.0f}")
+    print(f"  Filters:     sqft ±{sqft_range}%  |  year ±{year_range}  |  dist ≤{max_distance} mi")
+    print("=" * 75)
+
+    # Fetch comps
+    debug_query = build_debug_query(
+        parid=parid, project=project, dataset=dataset,
+        comp_year_start=comp_year_start, comp_year_end=comp_year_end,
+        min_comp_sale_price=min_comp_sale_price,
+        sqft_range=sqft_range, year_range=year_range,
+        acreage_range=acreage_range, max_distance=max_distance,
+        bed_range=bed_range, bath_range=bath_range,
+    )
+    comps = list(client.query(debug_query).result())
+
+    if not comps:
+        print("  No comps found — this property would not appear as a lead.")
+        print("=" * 75)
+        return
+
+    sale_prices = [float(c.sale_price) for c in comps]
+    median_sale = sorted(sale_prices)[len(sale_prices) // 2]
+    over_assessment = float(s.TotlAppr) - median_sale
+    est_savings = over_assessment * ASSESSMENT_RATIO * TAX_RATE
+
+    print(f"  Comps found: {len(comps)}  |  Median sale price: ${median_sale:,.0f}")
+    if over_assessment > 0:
+        print(f"  Over-assessment: ${over_assessment:,.0f}  |  Est. savings: ${est_savings:,.2f}/yr")
+    else:
+        print(f"  NOT over-assessed vs comp median (would not appear as lead)")
+    print("")
+    print(f"  {'#':<3} {'Address':<32} {'Assessment':>11}  {'Sale Price':>11}  {'Sale Date':<12} {'Sqft':>6}  {'Year':>5}  {'Bd/Ba':<6}  {'Dist':>6}  {'Sim':>6}")
+    print("  " + "-" * 113)
+    for i, c in enumerate(comps, 1):
+        addr = (c.comp_address[:30] if c.comp_address and len(c.comp_address) > 30 else (c.comp_address or "")).ljust(30)
+        sqft = f"{float(c.comp_sqft):,.0f}" if c.comp_sqft else "N/A"
+        beds = str(int(c.comp_beds)) if c.comp_beds else "?"
+        baths = f"{float(c.comp_baths):.1f}" if c.comp_baths else "?"
+        bed_bath = f"{beds}/{baths}"
+        dist = f"{float(c.distance_miles):.2f} mi"
+        sim = f"{float(c.similarity_score):.3f}"
+        date = c.sale_date or "N/A"
+        assessment = f"${float(c.comp_assessment):>10,.0f}" if c.comp_assessment else "        N/A"
+        print(f"  {i:<3} {addr}  {assessment}  ${float(c.sale_price):>10,.0f}  {date:<12} {sqft:>6}  {c.comp_year_built or '?':>5}  {bed_bath:<6}  {dist:>8}  {sim:>6}")
+    print("=" * 75)
+    print("")
+
+
 def fetch_leads(
     client: bigquery.Client,
     project: str,
@@ -625,6 +826,12 @@ Examples:
         action="store_true",
         help="Print the SQL query without executing"
     )
+    parser.add_argument(
+        "--debug-parid",
+        type=str,
+        default=None,
+        help="Show the exact comps used for a single property (by ParID)"
+    )
 
     args = parser.parse_args()
 
@@ -653,6 +860,24 @@ Examples:
 
     print(f"Connecting to BigQuery project: {args.project}", file=sys.stderr)
     client = bigquery.Client(project=args.project)
+
+    if args.debug_parid:
+        run_debug_parid(
+            client=client,
+            parid=args.debug_parid,
+            project=args.project,
+            dataset=args.dataset,
+            comp_year_start=args.comp_year_start,
+            comp_year_end=args.comp_year_end,
+            min_comp_sale_price=args.min_comp_sale_price,
+            sqft_range=args.sqft_range,
+            year_range=args.year_range,
+            acreage_range=args.acreage_range,
+            max_distance=args.max_distance,
+            bed_range=args.bed_range,
+            bath_range=args.bath_range,
+        )
+        return
 
     zipcode_msg = f" in zip code {args.zipcode}" if args.zipcode else ""
     bed_bath_msg = " (requiring bed/bath data)" if args.require_bed_bath else ""
