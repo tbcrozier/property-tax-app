@@ -26,7 +26,7 @@ from typing import Optional, List
 from google.cloud import bigquery
 
 # Configuration defaults
-DEFAULT_MIN_SAVINGS = 1500
+DEFAULT_MIN_SAVINGS = 500
 DEFAULT_YEAR_RANGE = 7
 DEFAULT_SQFT_RANGE = 15
 DEFAULT_ACREAGE_RANGE = 10
