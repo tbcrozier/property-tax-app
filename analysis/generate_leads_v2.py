@@ -31,7 +31,7 @@ from typing import Optional, List
 from google.cloud import bigquery
 
 # Configuration defaults
-DEFAULT_MIN_SAVINGS = 1000
+DEFAULT_MIN_SAVINGS = 500
 DEFAULT_YEAR_RANGE = 10
 DEFAULT_SQFT_RANGE = 20
 DEFAULT_ACREAGE_RANGE = 10
@@ -46,7 +46,7 @@ DEFAULT_MIN_COMP_SALE_PRICE = 100000
 DEFAULT_BQ_PROJECT = "public-data-dev"
 DEFAULT_BQ_DATASET = "property_tax"
 
-TAX_RATE = 0.03254
+TAX_RATE = 0.02782
 ASSESSMENT_RATIO = 0.25
 
 # Tight thresholds for the exact (first) pass before falling back to configured values
