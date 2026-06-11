@@ -39,7 +39,7 @@ DEFAULT_BQ_PROJECT = "public-data-dev"
 DEFAULT_BQ_DATASET = "property_tax"
 
 # Davidson County tax rate (3.254% per $100 of assessed value = 0.03254)
-TAX_RATE = 0.03254
+TAX_RATE = 0.02782
 ASSESSMENT_RATIO = 0.25
 
 
