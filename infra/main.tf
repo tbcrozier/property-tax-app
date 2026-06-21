@@ -892,16 +892,95 @@ resource "google_bigquery_table" "davidson_bed_bath" {
   deletion_protection = false
 
   schema = jsonencode([
-    { name = "parcel_id",      type = "STRING",    mode = "NULLABLE", description = "Parcel ID from source table" },
-    { name = "address",        type = "STRING",    mode = "NULLABLE", description = "Full property address" },
-    { name = "internal_id",    type = "STRING",    mode = "NULLABLE", description = "Portal internal property ID" },
-    { name = "beds",           type = "INTEGER",   mode = "NULLABLE", description = "Number of bedrooms" },
-    { name = "baths",          type = "INTEGER",   mode = "NULLABLE", description = "Number of full bathrooms" },
-    { name = "half_baths",     type = "INTEGER",   mode = "NULLABLE", description = "Number of half bathrooms" },
-    { name = "year_built",     type = "INTEGER",   mode = "NULLABLE", description = "Year structure was built" },
-    { name = "square_footage", type = "INTEGER",   mode = "NULLABLE", description = "Finished square footage" },
-    { name = "property_type",  type = "STRING",    mode = "NULLABLE", description = "Property type (e.g. SINGLE FAM)" },
-    { name = "error",          type = "STRING",    mode = "NULLABLE", description = "Error message if scrape failed" },
-    { name = "scraped_at",     type = "TIMESTAMP", mode = "NULLABLE", description = "When this row was scraped" }
+    { name = "parcel_id", type = "STRING", mode = "NULLABLE", description = "Parcel ID from source table" },
+    { name = "address", type = "STRING", mode = "NULLABLE", description = "Full property address" },
+    { name = "internal_id", type = "STRING", mode = "NULLABLE", description = "Portal internal property ID" },
+    { name = "beds", type = "INTEGER", mode = "NULLABLE", description = "Number of bedrooms" },
+    { name = "baths", type = "INTEGER", mode = "NULLABLE", description = "Number of full bathrooms" },
+    { name = "half_baths", type = "INTEGER", mode = "NULLABLE", description = "Number of half bathrooms" },
+    { name = "year_built", type = "INTEGER", mode = "NULLABLE", description = "Year structure was built" },
+    { name = "square_footage", type = "INTEGER", mode = "NULLABLE", description = "Finished square footage" },
+    { name = "property_type", type = "STRING", mode = "NULLABLE", description = "Property type (e.g. SINGLE FAM)" },
+    { name = "error", type = "STRING", mode = "NULLABLE", description = "Error message if scrape failed" },
+    { name = "scraped_at", type = "TIMESTAMP", mode = "NULLABLE", description = "When this row was scraped" }
   ])
 }
+
+# BigQuery Table - Williamson County Parcels
+resource "google_bigquery_table" "williamson_parcels" {
+  dataset_id          = google_bigquery_dataset.property_tax.dataset_id
+  table_id            = "williamson_parcels"
+  description         = "Williamson County (Franklin/Brentwood, TN) parcel assessment data"
+  deletion_protection = false
+
+  schema = jsonencode([
+    { name = "OBJECTID", type = "FLOAT64", mode = "NULLABLE", description = "ArcGIS object ID" },
+    { name = "GISLINK", type = "STRING", mode = "NULLABLE", description = "GIS parcel link key" },
+    { name = "lrsn", type = "FLOAT64", mode = "NULLABLE", description = "Local record sequence number" },
+    { name = "parcel_id", type = "STRING", mode = "NULLABLE", description = "Parcel ID" },
+    { name = "county", type = "STRING", mode = "NULLABLE", description = "County code" },
+    { name = "CITY", type = "STRING", mode = "NULLABLE", description = "City" },
+    { name = "neighborho", type = "FLOAT64", mode = "NULLABLE", description = "Neighborhood code" },
+    { name = "ADDRESS", type = "STRING", mode = "NULLABLE", description = "Full property address" },
+    { name = "streetnumber", type = "STRING", mode = "NULLABLE", description = "Street number" },
+    { name = "streetnumbersfx", type = "STRING", mode = "NULLABLE", description = "Street number suffix" },
+    { name = "streetname", type = "STRING", mode = "NULLABLE", description = "Street name" },
+    { name = "SUBDIVISION", type = "STRING", mode = "NULLABLE", description = "Subdivision name" },
+    { name = "owner1", type = "STRING", mode = "NULLABLE", description = "Primary owner name" },
+    { name = "owner2", type = "STRING", mode = "NULLABLE", description = "Secondary owner name" },
+    { name = "own_street", type = "STRING", mode = "NULLABLE", description = "Owner mailing street" },
+    { name = "own_city", type = "STRING", mode = "NULLABLE", description = "Owner mailing city" },
+    { name = "own_state", type = "STRING", mode = "NULLABLE", description = "Owner mailing state" },
+    { name = "own_zip", type = "STRING", mode = "NULLABLE", description = "Owner mailing zip" },
+    { name = "pxfer_date", type = "DATE", mode = "NULLABLE", description = "Most recent transfer date" },
+    { name = "considerat", type = "FLOAT64", mode = "NULLABLE", description = "Most recent sale price" },
+    { name = "pxfer_da_1", type = "DATE", mode = "NULLABLE", description = "Prior transfer date" },
+    { name = "consider_1", type = "FLOAT64", mode = "NULLABLE", description = "Prior sale price" },
+    { name = "deed_book", type = "STRING", mode = "NULLABLE", description = "Deed book" },
+    { name = "deed_page", type = "STRING", mode = "NULLABLE", description = "Deed page" },
+    { name = "imp_assess", type = "FLOAT64", mode = "NULLABLE", description = "Improvement assessed value" },
+    { name = "imp_val", type = "FLOAT64", mode = "NULLABLE", description = "Improvement market value" },
+    { name = "land_asses", type = "FLOAT64", mode = "NULLABLE", description = "Land assessed value" },
+    { name = "land_marke", type = "FLOAT64", mode = "NULLABLE", description = "Land market value" },
+    { name = "total_asse", type = "FLOAT64", mode = "NULLABLE", description = "Total assessed value" },
+    { name = "total_mark", type = "FLOAT64", mode = "NULLABLE", description = "Total market value" },
+    { name = "SQFT_ASSES", type = "FLOAT64", mode = "NULLABLE", description = "Assessed square footage" },
+    { name = "AC", type = "FLOAT64", mode = "NULLABLE", description = "Acreage" },
+    { name = "CALC_ACRE", type = "FLOAT64", mode = "NULLABLE", description = "Calculated acreage from GIS" },
+    { name = "property_T", type = "FLOAT64", mode = "NULLABLE", description = "Property type code" },
+    { name = "PARCEL_TYP", type = "FLOAT64", mode = "NULLABLE", description = "Parcel type code" },
+    { name = "Lat", type = "FLOAT64", mode = "NULLABLE", description = "Latitude (centroid)" },
+    { name = "Lon", type = "FLOAT64", mode = "NULLABLE", description = "Longitude (centroid)" },
+    { name = "load_timestamp", type = "TIMESTAMP", mode = "NULLABLE", description = "When the record was loaded" }
+  ])
+}
+
+
+resource "google_bigquery_table" "tn_parcels_86_counties" {
+  dataset_id          = google_bigquery_dataset.property_tax.dataset_id
+  table_id            = "tn_parcels_86_counties"
+  description         = "Tennessee parcel boundaries for 86 counties (excludes Davidson, Williamson, Knox, Shelby, Hamilton, Montgomery, Rutherford, Chester, Hickman)"
+  deletion_protection = false
+
+  schema = jsonencode([
+    { name = "OBJECTID", type = "INTEGER", mode = "NULLABLE", description = "ArcGIS object ID" },
+    { name = "COUNTY_ID", type = "INTEGER", mode = "NULLABLE", description = "County numeric ID" },
+    { name = "COUNTY_NAME", type = "STRING", mode = "NULLABLE", description = "County name" },
+    { name = "PARCEL_TYPE", type = "INTEGER", mode = "NULLABLE", description = "Parcel type code" },
+    { name = "GISLINK", type = "STRING", mode = "NULLABLE", description = "15-char GIS parcel key" },
+    { name = "PARCELID", type = "STRING", mode = "NULLABLE", description = "Full parcel ID" },
+    { name = "PARCEL", type = "STRING", mode = "NULLABLE", description = "Parcel identifier" },
+    { name = "ADDRESS", type = "STRING", mode = "NULLABLE", description = "Situs address" },
+    { name = "OWNER", type = "STRING", mode = "NULLABLE", description = "Primary owner name" },
+    { name = "OWNER2", type = "STRING", mode = "NULLABLE", description = "Secondary owner name" },
+    { name = "DEEDAC", type = "FLOAT64", mode = "NULLABLE", description = "Deed acreage" },
+    { name = "SUBDIV", type = "STRING", mode = "NULLABLE", description = "Subdivision name" },
+    { name = "LOT", type = "STRING", mode = "NULLABLE", description = "Lot number" },
+    { name = "LINK_TPAD", type = "STRING", mode = "NULLABLE", description = "URL to TPAD assessment record" },
+    { name = "LINK_TPV", type = "STRING", mode = "NULLABLE", description = "URL to TPV record" },
+    { name = "Lat", type = "FLOAT64", mode = "NULLABLE", description = "Latitude (polygon centroid)" },
+    { name = "Lon", type = "FLOAT64", mode = "NULLABLE", description = "Longitude (polygon centroid)" },
+    { name = "load_timestamp", type = "TIMESTAMP", mode = "NULLABLE", description = "When the record was loaded" }
+  ])
+}
+

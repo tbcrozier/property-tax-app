@@ -1,0 +1,113 @@
+=== SERVICE INFO ===
+{
+  "maxRecordCount": 1000,
+  "layers": [
+    {
+      "id": 0,
+      "name": "TENNESSEE PROPERTY BOUNDARIES"
+    }
+  ]
+}
+=== LAYER 0 FIELDS ===
+{
+  "name": "TENNESSEE PROPERTY BOUNDARIES",
+  "maxRecordCount": 2000,
+  "capabilities": "Query",
+  "pagination": true,
+  "fields": [
+    {
+      "name": "OBJECTID",
+      "type": "esriFieldTypeOID",
+      "alias": "OBJECTID"
+    },
+    {
+      "name": "COUNTY_ID",
+      "type": "esriFieldTypeSmallInteger",
+      "alias": "COUNTY_ID"
+    },
+    {
+      "name": "PARCEL_TYPE",
+      "type": "esriFieldTypeInteger",
+      "alias": "PARCEL_TYPE"
+    },
+    {
+      "name": "GISLINK",
+      "type": "esriFieldTypeString",
+      "alias": "GISLINK"
+    },
+    {
+      "name": "PARCELID",
+      "type": "esriFieldTypeString",
+      "alias": "PARCELID"
+    },
+    {
+      "name": "PARCEL",
+      "type": "esriFieldTypeString",
+      "alias": "PARCEL"
+    },
+    {
+      "name": "ADDRESS",
+      "type": "esriFieldTypeString",
+      "alias": "ADDRESS"
+    },
+    {
+      "name": "DEEDAC",
+      "type": "esriFieldTypeDouble",
+      "alias": "DEEDAC"
+    },
+    {
+      "name": "OWNER",
+      "type": "esriFieldTypeString",
+      "alias": "OWNER"
+    },
+    {
+      "name": "OWNER2",
+      "type": "esriFieldTypeString",
+      "alias": "OWNER2"
+    },
+    {
+      "name": "SUBDIV",
+      "type": "esriFieldTypeString",
+      "alias": "SUBDIV"
+    },
+    {
+      "name": "LOT",
+      "type": "esriFieldTypeString",
+      "alias": "LOT"
+    },
+    {
+      "name": "LINK_TPAD",
+      "type": "esriFieldTypeString",
+      "alias": "LINK_TPAD"
+    },
+    {
+      "name": "LINK_TPV",
+      "type": "esriFieldTypeString",
+      "alias": "LINK_TPV"
+    },
+    {
+      "name": "COUNTY_NAME",
+      "type": "esriFieldTypeString",
+      "alias": "COUNTY_NAME"
+    }
+  ]
+}
+=== TOTAL COUNT ===
+{"count":2137647}=== SAMPLE RECORD ===
+{
+  "OBJECTID": 1995,
+  "COUNTY_ID": 1,
+  "PARCEL_TYPE": 1,
+  "GISLINK": "001003    00100",
+  "PARCELID": "001 003    00100 000 2026",
+  "PARCEL": "001.00",
+  "ADDRESS": "DUNCAN LN 419",
+  "DEEDAC": 1.42,
+  "OWNER": "SELKE ALAN",
+  "OWNER2": "AND WIFE DORENA SELKE",
+  "SUBDIV": "T L DUKE",
+  "LOT": "  11",
+  "LINK_TPAD": "https://assessment.cot.tn.gov/TPAD/Parcel/GIS?gislink=001003%20%20%20%2000100",
+  "LINK_TPV": "https://tnmap.tn.gov/assessment/#/parcel/001003%20%20%20%2000100",
+  "COUNTY_NAME": "Anderson"
+}
