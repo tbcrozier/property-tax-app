@@ -23,6 +23,7 @@ Usage:
 import argparse
 import csv
 import json
+import statistics
 import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -312,18 +313,24 @@ def build_leads_query(
     top_comps AS (
       SELECT * FROM ranked_comps WHERE rank <= 20
     ),
+    comp_medians AS (
+      SELECT DISTINCT ParID,
+        PERCENTILE_CONT(comp_sale_price, 0.5) OVER (PARTITION BY ParID) AS median_sale_price
+      FROM top_comps
+    ),
     comp_stats AS (
       SELECT
-        ParID,
-        total_comps,
+        tc.ParID,
+        ANY_VALUE(tc.total_comps) AS total_comps,
         COUNT(*) AS comps_used,
-        AVG(similarity_score) AS avg_similarity,
-        AVG(distance_miles) AS avg_distance_miles,
-        APPROX_QUANTILES(comp_sale_price, 100)[OFFSET(50)] AS median_sale_price,
-        LOGICAL_OR(has_bed_bath_data) AS has_bed_bath_data,
-        ANY_VALUE(match_type) AS match_type
-      FROM top_comps
-      GROUP BY ParID, total_comps
+        AVG(tc.similarity_score) AS avg_similarity,
+        AVG(tc.distance_miles) AS avg_distance_miles,
+        ANY_VALUE(cm.median_sale_price) AS median_sale_price,
+        LOGICAL_OR(tc.has_bed_bath_data) AS has_bed_bath_data,
+        ANY_VALUE(tc.match_type) AS match_type
+      FROM top_comps tc
+      JOIN comp_medians cm USING (ParID)
+      GROUP BY tc.ParID
     ),
     leads AS (
       SELECT
@@ -597,7 +604,7 @@ def run_debug_parid(
     match_label = "EXACT (strict criteria met min comps)" if match_type == "exact" else f"FALLBACK (exact pass had < {min_comparables} comps; loose criteria used)"
 
     sale_prices = [float(c.sale_price) for c in comps]
-    median_sale = sorted(sale_prices)[len(sale_prices) // 2]
+    median_sale = statistics.median(sale_prices)
     over_assessment = float(s.TotlAppr) - median_sale
     est_savings = over_assessment * ASSESSMENT_RATIO * TAX_RATE
 
